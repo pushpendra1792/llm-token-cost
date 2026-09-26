@@ -67,6 +67,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "size": "npm pack --dry-run",
+    "update:pricing": "node scripts/update-pricing.mjs",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {
@@ -74,5 +75,8 @@
     "tsup": "^8.5.1",
     "typescript": "^6.0.3",
     "vitest": "^5.0.2"
+  },
+  "dependencies": {
+    "js-tiktoken": "^1.0.21"
   }
 }
