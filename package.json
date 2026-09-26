@@ -1,0 +1,78 @@
+{
+  "name": "llm-token-cost",
+  "version": "0.1.0",
+  "description": "Estimate LLM token counts and costs from raw prompt/completion text. Modern, zero-runtime-dependency successor to llm-cost.",
+  "keywords": [
+    "llm",
+    "tokens",
+    "tokenizer",
+    "tiktoken",
+    "cost",
+    "pricing",
+    "openai",
+    "anthropic",
+    "claude",
+    "gpt",
+    "gemini",
+    "llm-cost",
+    "token-usage",
+    "cost-estimation"
+  ],
+  "license": "MIT",
+  "author": "pushpendra1792",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "llm-token-cost": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pushpendra1792/llm-token-cost.git"
+  },
+  "homepage": "https://github.com/pushpendra1792/llm-token-cost#readme",
+  "bugs": {
+    "url": "https://github.com/pushpendra1792/llm-token-cost/issues"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "size": "npm pack --dry-run",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.2"
+  }
+}

@@ -1,0 +1,78 @@
+name: Update pricing snapshot
+
+on:
+  schedule:
+    - name: Weekly pricing refresh
+      cron: '17 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: update-pricing
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    name: Refresh src/pricing/snapshot.json
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Detect pricing refresher
+        id: refresher
+        run: |
+          if node -p "!!(require('./package.json').scripts || {})['update:pricing']" | grep -q true; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::no update:pricing script yet - snapshot refresher lands in Phase 1"
+          fi
+
+      - name: Refresh pricing snapshot
+        if: steps.refresher.outputs.available == 'true'
+        run: npm run update:pricing
+
+      - name: Verify snapshot is present and well-formed
+        run: |
+          test -f src/pricing/snapshot.json
+          node -e "
+            const s = require('./src/pricing/snapshot.json');
+            if (s.schemaVersion !== 1) throw new Error('unexpected schemaVersion: ' + s.schemaVersion);
+            if (typeof s.models !== 'object' || s.models === null) throw new Error('models must be an object');
+          "
+
+      - name: Verify build still passes
+        if: steps.refresher.outputs.available == 'true'
+        run: |
+          npm run typecheck
+          npm run test
+          npm run build
+
+      - name: Open pull request
+        if: steps.refresher.outputs.available == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: chore/update-pricing
+          base: main
+          commit-message: 'chore(pricing): refresh pricing snapshot'
+          title: 'chore(pricing): refresh pricing snapshot'
+          body: |
+            Automated weekly refresh of `src/pricing/snapshot.json`.
+
+            - [ ] Review newly added models
+            - [ ] Review removed or deprecated models
+            - [ ] Spot-check a few prices against vendor pricing pages
+          add-paths: src/pricing/snapshot.json
+          delete-branch: true
