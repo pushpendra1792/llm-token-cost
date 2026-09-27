@@ -31,6 +31,24 @@ describe('tiktoken encoding resolution', () => {
     expect(resolveTiktokenEncoding('ft:gpt-4o-2024-08-06')).toBe('o200k_base');
   });
 
+  it('fills js-tiktoken gaps for the gpt-5.x line via the prefix table', () => {
+    // js-tiktoken 1.0.21 is the latest release and its table stops at `gpt-5`,
+    // so these all threw before the prefix table was added. Upstream added
+    // `gpt-5.1` in openai/tiktoken#468 without backporting to the JS port.
+    for (const model of ['gpt-5.1', 'gpt-5.2', 'gpt-5.4', 'gpt-5.5', 'gpt-5.6-luna']) {
+      expect(resolveTiktokenEncoding(model), model).toBe('o200k_base');
+    }
+    expect(resolveTiktokenEncoding('azure/eu/gpt-5.1-codex-max')).toBe('o200k_base');
+  });
+
+  it('does not guess an encoding for models where none is published', () => {
+    // Claiming o200k_base here would report `estimated: false` for a model whose
+    // real encoding is unknown, which is the one failure mode worth avoiding.
+    for (const model of ['gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-oss-120b', 'gpt-oss-20b']) {
+      expect(resolveTiktokenEncoding(model), model).toBeUndefined();
+    }
+  });
+
   it('returns undefined for models whose tokenizer is not published', () => {
     for (const model of [
       'claude-sonnet-4-5',
@@ -53,10 +71,26 @@ describe('resolveTokenizer', () => {
     expect(tokenizer.encoding).toBe('o200k_base');
   });
 
-  it('falls back to the heuristic for everything else', () => {
+  it('falls back to the generic heuristic for non-Anthropic, non-OpenAI models', () => {
+    for (const model of ['gemini-2.5-pro', 'llama-3.3-70b-versatile', 'mistral-large-latest']) {
+      const tokenizer = resolveTokenizer(model);
+      expect(tokenizer.kind, model).toBe('heuristic');
+      expect(tokenizer.encoding, model).toBeUndefined();
+    }
+  });
+
+  it('uses the Anthropic correction rather than the generic fallback', () => {
     const tokenizer = resolveTokenizer('claude-sonnet-4-5');
-    expect(tokenizer.kind).toBe('heuristic');
+    expect(tokenizer.kind).toBe('anthropic-heuristic');
     expect(tokenizer.encoding).toBeUndefined();
+    expect(tokenizer.anthropicGeneration).toBe('legacy');
+  });
+
+  it('prefers the exact path when an id appears in both tables', () => {
+    // Order matters: a Claude-named id that tiktoken knows must still be exact.
+    const tokenizer = resolveTokenizer('ft:gpt-4o-2024-08-06');
+    expect(tokenizer.kind).toBe('tiktoken');
+    expect(tokenizer.countTokens('hello world')).toBe(o200k.encode('hello world').length);
   });
 
   it('counts exactly like tiktoken on the exact path', () => {

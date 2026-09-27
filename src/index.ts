@@ -9,8 +9,17 @@ export {
 } from './errors';
 export type { LlmTokenCostErrorCode } from './errors';
 
-export { estimateTokensHeuristic, resolveTokenizer } from './tokenizers';
-export type { Tokenizer, TokenizerKind } from './tokenizers';
+export {
+  anthropicTokenRatio,
+  anthropicTokenizerGeneration,
+  estimateTokensAnthropic,
+  isAnthropicModel,
+  estimateTokensHeuristic,
+  estimateTokensHeuristicScaled,
+  resolveTokenizer,
+} from './tokenizers';
+export type { AnthropicTokenizerGeneration, Tokenizer, TokenizerKind } from './tokenizers';
+export { getTiktokenEncoder, isTiktokenModel, resolveTiktokenEncoding } from './tokenizers';
 
 export {
   DEFAULT_PRICING_TTL_MS,

@@ -66,16 +66,31 @@ const countCjkCharacters = (text: string): number => text.match(CJK_PATTERN)?.le
 const countWords = (text: string): number => text.split(/\s+/u).filter(Boolean).length;
 
 /**
- * Estimates the token count of `text` without a real tokenizer.
+ * Estimates the token count of `text` without a real tokenizer, optionally
+ * scaled for a provider whose tokenizer is denser than the OpenAI BPE this
+ * blend is calibrated against.
+ *
+ * `scale` exists for Anthropic models only. It is a provider-level correction,
+ * not a retuning of the blend, so the constants below stay calibrated against
+ * `o200k_base` and there is a single place to reason about per-provider drift.
  *
  * Returns 0 for empty input, matching tiktoken's behaviour so that callers do
  * not have to special-case the empty string.
  */
-export const estimateTokensHeuristic = (text: string): number => {
+export const estimateTokensHeuristicScaled = (text: string, scale: number): number => {
   if (text.length === 0) return 0;
 
   const charSignal = text.length / CHARS_PER_TOKEN + countCjkCharacters(text) * TOKENS_PER_CJK_CHAR;
   const wordSignal = countWords(text) * TOKENS_PER_WORD;
 
-  return Math.max(1, Math.ceil(CHAR_WEIGHT * charSignal + (1 - CHAR_WEIGHT) * wordSignal));
+  return Math.max(1, Math.ceil((CHAR_WEIGHT * charSignal + (1 - CHAR_WEIGHT) * wordSignal) * scale));
 };
+
+/**
+ * Estimates the token count of `text` without a real tokenizer.
+ *
+ * Returns 0 for empty input, matching tiktoken's behaviour so that callers do
+ * not have to special-case the empty string.
+ */
+export const estimateTokensHeuristic = (text: string): number =>
+  estimateTokensHeuristicScaled(text, 1);

@@ -65,6 +65,10 @@ export const estimateCost = async (
     outputTokens,
     cost,
     currency: PRICING_CURRENCY,
-    estimated: tokenizer.kind === 'heuristic' || pricing.estimated,
+    // Fail-safe on purpose: only `tiktoken` is exact, so this must be written
+    // as "not the exact tokenizer" rather than "is the generic heuristic".
+    // A new tokenizer kind added later then reports `estimated: true` by
+    // default instead of silently claiming an exact count it cannot deliver.
+    estimated: tokenizer.kind !== 'tiktoken' || pricing.estimated,
   };
 };

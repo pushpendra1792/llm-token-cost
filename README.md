@@ -159,6 +159,94 @@ models accurately.
 `o3-mini`, ... resolve to `o200k_base`; `gpt-4`, `gpt-3.5-turbo` to
 `cl100k_base`).
 
+`js-tiktoken`'s compiled-in table stops at `gpt-5`, so this package adds a
+prefix table mirroring OpenAI's own `MODEL_PREFIX_TO_ENCODING` (the same
+approach upstream uses so that "prefix matching avoids needing library updates
+for every model version release"). That recovers exact counts for 242 models
+LiteLLM lists, including the whole `gpt-5.1`+ line — `gpt-5.1` was added
+upstream in openai/tiktoken#468 and shipped in Python `tiktoken` 0.14, but was
+never backported to the JS port. Models with no published encoding (`gpt-6-*`,
+`gpt-oss-*`) are deliberately left on the heuristic rather than guessed at, since
+claiming `estimated: false` for a model we cannot count is the one failure worth
+avoiding.
+
+### Anthropic and Google
+
+Anthropic and Google do not publish their tokenizers, so those models are
+estimated and always report `estimated: true`.
+
+`@anthropic-ai/tokenizer` was evaluated and **rejected**. It is installable and
+would look like the obvious answer, but:
+
+- it was last published **2023-07-05** at `0.0.4` and never again, so it
+  predates Claude 3 and its vocabulary cannot describe any currently sold model;
+- its own README says "As of the Claude 3 models, this algorithm is no longer
+  accurate, but can be used as a very rough approximation";
+- Anthropic has said client-side counting is not coming back — asked directly,
+  the answer was that it is "no longer possible to provide ahead-of-time
+  client-side accurate token counts", and to "use heuristic estimates and give
+  yourself a buffer";
+- it depends on `tiktoken@^1`, the stale CJS line this package exists to replace.
+
+The only exact option is the `count_tokens` API, which needs an API key and a
+network round trip. That is a different product: this library answers the
+question asked *before* the request, with no credentials and no latency.
+
+So Claude gets a **provider-corrected** estimate instead of the generic blend,
+using two published facts rather than a fitted corpus:
+
+| Correction | Factor | Source |
+| --- | --- | --- |
+| base | 1.0x | blend calibrated against OpenAI BPE |
+| `tiktoken` undercounts Claude by ~15-20% | 1.2x | [Anthropic's guidance](https://github.com/anthropics/skills/blob/main/skills/claude-api/shared/token-counting.md) |
+| Claude 4.7+ ships a newer tokenizer, ~30% more tokens | 1.3x | [Claude token-counting docs](https://platform.claude.com/docs/en/build-with-claude/token-counting) |
+
+Anthropic's wording on the first row is worth quoting, because it is a warning
+against exactly this kind of arithmetic: **"Do not use `tiktoken`. It's OpenAI's
+tokenizer. It undercounts Claude tokens by ~15-20% on typical text, and by much
+more on code or non-English input."**
+
+The 1.2 sits mid-band and is **deliberately biased high**. The `tiktoken` gap is
+consistently one-sided — it errs low, never high — so for a pre-flight check an
+estimate that rounds down would under-report cost, while one that rounds up only
+reserves more budget than needed. `1.2` yields 1.18x at the 15% end and 1.25x at
+the 20% end.
+
+A flat multiplier is still a blunt instrument, and this is the approach's main
+weakness. The 15-20% is a *typical text* figure; reported drift runs from ~9% on
+English prose to ~24% on code diffs and ~38% on serialized JSON, because two BPEs
+diverge most on the inputs neither was optimized for. One ratio cannot capture
+that spread, and the real fix is `count_tokens`, not a better constant.
+
+The 4.7 boundary is detected from the version in the model id. Anthropic's docs
+confirm the same tokenizer covers `claude-fable-5-1`, `claude-mythos-5-1`,
+`claude-fable-5` and `claude-mythos-5` alongside 4.7+, all of which this picks up
+via the major version, and note a prompt "counts the same on all four". Mythos
+Preview is handled separately: it carries no version number at all, so the numeric
+rule cannot see it, and matching the name is the only option.
+
+These are aggregate corrections. Aggregate cost lands close; individual documents
+still vary.
+
+The one public ground truth available is Anthropic's own example: a system prompt
+`"You are a scientist"` plus the user message `"Hello, Claude"` on
+`claude-opus-5-5` returns `input_tokens: 14`. The current-generation estimate
+returns **13** for that same content. The residual token is not error — Anthropic
+notes that counts "may include tokens added automatically by Anthropic for system
+optimizations" and that "you are not billed for system-added tokens", so 13
+content tokens against a 14-token response that includes unbilled framing is
+effectively exact on the number that is actually charged.
+
+Two caveats on that. The correction factors are *documented ratios*, not
+measurements taken here, and Anthropic's docs say the exact 30% increase "depends
+on the content and workload shape". This library models prompt and completion
+text only: it does not model tool definitions, which are billed input tokens and
+are typically large.
+
+Google's Gemini models use the generic blend, uncorrected.
+
+### Generic heuristic
+
 Everything else uses a character/word/CJK blend. Measured against `o200k_base`
 over a 90-sample corpus (prose, short sentences, code, JSON, markdown, CJK,
 Cyrillic, Arabic, emoji; ~4.4k tokens):
@@ -187,8 +275,9 @@ src/
 ├── errors.ts                typed error classes
 ├── model-id.ts              shared model-id normalization
 ├── tokenizers/
-│   ├── index.ts             picks tiktoken vs heuristic per model
-│   ├── openai.ts            exact tiktoken counts
+│   ├── index.ts             picks tiktoken / Anthropic / heuristic per model
+│   ├── openai.ts            exact tiktoken counts + prefix table
+│   ├── anthropic.ts         Claude generation detection + correction
 │   └── heuristic.ts         character/word/CJK blend
 ├── pricing/
 │   ├── fetch.ts             live fetch + TTL cache + snapshot fallback
@@ -233,7 +322,16 @@ npm run size           # inspect what would be published
 | 1 | Tokenizers + pricing + `estimateCost` | Done |
 | 2 | CLI | Done |
 | 2b | Budget guardrails | Next |
+| 2c | Provider-aware tokenizers (Anthropic + OpenAI prefix table) | Done |
 | 3 | Stable release, docs site | Planned |
+
+The MAPE and p95 figures in [Tokenizer accuracy](#tokenizer-accuracy) are
+**offline measurements from a 90-sample corpus**, not a build-time gate: that
+corpus is not checked into the repo, so the test suite does not re-derive them.
+The Anthropic correction factors and the 4.7 boundary *are* pinned by tests, and
+the blend has unit tests, but a regression in aggregate accuracy would not fail
+the build. Treat the table as a one-time measurement and re-run the calibration
+if the blend changes.
 
 ## License
 
