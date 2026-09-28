@@ -32,11 +32,29 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      # No registry-url here on purpose: setting it makes setup-node write a
+      # project .npmrc holding an unresolved ${NODE_AUTH_TOKEN} placeholder,
+      # which can stop npm from reaching the OIDC exchange. npm already defaults
+      # to registry.npmjs.org.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
           cache: npm
+
+      # npm trusted publishing requires npm >= 11.5.1, but the Node 22 toolchain
+      # on the runner ships npm 10.x. Upgraded once here so the whole job runs on
+      # a single npm version instead of mixing 10.x through install and build.
+      # Pinned to the 11.x line rather than @latest so a future npm major cannot
+      # change install or publish behaviour without a commit here.
+      - name: Upgrade npm for trusted publishing
+        run: |
+          npm install -g npm@11
+          NPM_VERSION="$(npm --version)"
+          if [ "$(printf '%s\n' '11.5.1' "$NPM_VERSION" | sort -V | head -n 1)" != '11.5.1' ]; then
+            echo "::error::npm $NPM_VERSION is too old. npm trusted publishing (OIDC) requires npm >= 11.5.1."
+            exit 1
+          fi
+          echo "npm $NPM_VERSION satisfies the >= 11.5.1 requirement for trusted publishing."
 
       - name: Install dependencies
         run: npm ci
@@ -56,15 +74,6 @@ jobs:
           npm run typecheck
           npm run test
           npm run build
-
-      # Surfaces the most common bootstrap failure - this workflow not yet
-      # registered as a trusted publisher on npm - before anything is built.
-      - name: Verify npm authentication
-        run: |
-          if ! npm whoami; then
-            echo "::error::npm rejected the OIDC token. Register this workflow as a trusted publisher on npm (README, Releasing) or re-run after the manual bootstrap publish."
-            exit 1
-          fi
 
       - name: Check version is not already published
         run: |
