@@ -5,9 +5,8 @@
 [![npm license](https://img.shields.io/npm/l/llm-token-cost.svg)](https://www.npmjs.com/package/llm-token-cost)
 
 > **Status: phases 0-5 shipped** — tokenizers and pricing, CLI, budget
-> guardrails, and the CI and publish automation. The package is at `0.1.0` and
-> the API is not frozen, so expect breaking changes before `1.0`. See
-> [Roadmap](#roadmap).
+> guardrails, and the CI and publish automation. The API is not frozen, so
+> expect breaking changes before `1.0`. See [Roadmap](#roadmap).
 
 Estimate LLM token counts and costs from raw prompt/completion text. A modern,
 maintained successor to the stale [`llm-cost`](https://www.npmjs.com/package/llm-cost)
@@ -40,7 +39,6 @@ not claimed either way.
 
 | | **llm-token-cost** | **llm-cost** | **tiktoken** (PyPI) | **litellm** (PyPI) |
 | --- | --- | --- | --- | --- |
-| Latest version | 0.1.0 | 1.0.5 | 0.14.0 | 1.103.0 |
 | Last release | 2026-09-28 | 2024-07-19 | 2026-08-17 | 2026-09-27 |
 | License | MIT | MIT | MIT | MIT |
 | Runtime | Node >= 20 | Node, no `engines` field | Python >= 3.9 | Python >= 3.10, < 3.15 |
@@ -623,18 +621,28 @@ npm publishing uses **trusted publishing** (OIDC) rather than a long-lived
 token: the registry mints a short-lived credential per run, so **no `NPM_TOKEN`
 secret has to be set on this repository**.
 
-The first release cannot use that flow, because a package must already exist on
-npm before it can be registered as a trusted publisher. Bootstrap it by hand once:
+A release is a tag. Bump the version, which commits the change and creates the
+tag, then push the tag:
 
 ```bash
-npm version 0.1.0 --no-git-tag-version   # no tag: a v* tag would fire publish.yml
-npm install
-npm run prepublishOnly                   # typecheck + test + build
-npm publish --access public              # prompts to log in
+npm version <x.y.z>        # bumps package.json, commits, tags v<x.y.z>
+git push --follow-tags     # the tag is what triggers the publish
 ```
 
-Then commit and push that version bump, and on npmjs.com add a trusted publisher
-under the package's settings:
+The tag runs `.github/workflows/publish.yml`, which refuses to continue if the
+tag disagrees with the `package.json` version, if any check fails, or if the
+version is already on npm, and then publishes to npm using trusted publishing.
+**No npm token is used or needed at any point.** The GitHub release is created
+by a follow-on job that only runs once the publish has succeeded.
+
+Trusted publishing needs npm 11.5.1 or newer, which is why the workflow upgrades
+npm before it does anything else.
+
+#### One-time setup on npmjs.com (already done for this package)
+
+A package has to exist on npm before it can be registered as a trusted
+publisher, so the first release has to be published by hand. That bootstrap is
+done. The publisher itself is configured once under the package's settings:
 
 | Field | Value |
 | --- | --- |
@@ -642,17 +650,11 @@ under the package's settings:
 | Repository | `pushpendra1792/llm-token-cost` |
 | Workflow filename | `publish.yml` |
 | Environment | leave blank |
+| Allow npm publish | ticked |
 
-Every release after that is a single command:
-
-```bash
-npm version 0.1.1        # bumps package.json, tags v0.1.1, pushes the tag
-```
-
-That tag runs `publish.yml`, which refuses to continue if the tag disagrees with
-the `package.json` version, if any check fails, or if the version is already on
-npm. The GitHub release is created by a follow-on job that only runs once the
-publish has succeeded.
+Leave **Allow npm publish** ticked. With it unticked the workflow still starts
+normally, but the publish fails with a misleading `ENEEDAUTH` error, which reads
+like a missing token rather than a missing permission.
 
 ## Roadmap
 
