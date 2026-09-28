@@ -2,12 +2,23 @@ export { estimateCost } from './estimate';
 export type { EstimateCostInput, EstimateCostResult } from './estimate';
 
 export {
+  BudgetExceededError,
   InvalidInputError,
   LlmTokenCostError,
   PricingFetchError,
   UnknownModelError,
 } from './errors';
-export type { LlmTokenCostErrorCode } from './errors';
+export type { BudgetExceededInfo, LlmTokenCostErrorCode } from './errors';
+
+export { createBudget } from './budget/guardrails';
+export type {
+  Budget,
+  BudgetCheck,
+  BudgetExceededContext,
+  BudgetMode,
+  BudgetOptions,
+  BudgetSpend,
+} from './budget/types';
 
 export {
   anthropicTokenRatio,

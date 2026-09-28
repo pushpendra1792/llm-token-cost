@@ -3,8 +3,8 @@
 [![CI](https://github.com/pushpendra1792/llm-token-cost/actions/workflows/ci.yml/badge.svg)](https://github.com/pushpendra1792/llm-token-cost/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/llm-token-cost.svg)](https://www.npmjs.com/package/llm-token-cost)
 
-> **Status: v1 core (Phase 1) + CLI (Phase 2) shipped, API unstable.** The budget
-> guardrails are not implemented yet. See [Roadmap](#roadmap).
+> **Status: v1 core (Phase 1), CLI (Phase 2) and budget guardrails shipped, API
+> unstable.** See [Roadmap](#roadmap).
 
 Estimate LLM token counts and costs from raw prompt/completion text. A modern,
 maintained successor to the stale [`llm-cost`](https://www.npmjs.com/package/llm-cost)
@@ -156,6 +156,112 @@ degrades to the bundled snapshot, so it returns an approximation instead of
 throwing. The snapshot bundles ~3,600 models, so offline use still prices real
 models accurately.
 
+## Budget guardrails
+
+`createBudget` turns an `estimateCost` result into a spending limit, so a request
+can be stopped *before* it is sent rather than reported after the fact.
+
+```ts
+import { createBudget, estimateCost } from 'llm-token-cost';
+
+const budget = createBudget({
+  limit: 5,          // USD
+  mode: 'hard',      // stop the call; the default only reports
+  scope: 'user-123', // your own label, see "Scoped budgets"
+});
+
+const estimate = await estimateCost({ model: 'gpt-4o', inputText, outputText });
+budget.track(estimate); // throws BudgetExceededError here, so nothing is sent
+const completion = await callTheModel({ model: 'gpt-4o', inputText, outputText });
+```
+
+`mode` decides what happens when a tracked cost would cross the limit:
+
+| `mode` | On crossing | Cost recorded? |
+| --- | --- | --- |
+| `soft` (default) | fires `onBudgetExceeded` once, then carries on | yes |
+| `hard` | throws `BudgetExceededError`, so the call can be abandoned | no |
+
+Hard mode is the one that actually stops work. The cost is rejected *before* it
+is charged, so the budget still reports only what you committed and a smaller
+retry can still go through.
+
+```ts
+const budget = createBudget({
+  limit: 1,
+  mode: 'hard',
+  onBudgetExceeded: ({ limit, total, cost, scope, estimated }) => {
+    logger.warn({ limit, total, cost, scope, estimated }, 'budget exceeded');
+  },
+});
+```
+
+The callback gets the limit, the total *including* the cost that crossed it, that
+cost, the scope, and whether the cost was estimated. It fires once, on the first
+crossing — never before the limit is crossed, and never again for later
+overspends. A spend that lands exactly on the limit does not count as crossed.
+
+`hard` mode reports by throwing rather than calling back, and the error carries
+the same fields, so log from the `catch` if you want a trail.
+
+### Scoped budgets
+
+A budget is one object with one total, so separate scopes are separate instances
+and nothing leaks between them. `scope` is only a label for your callback:
+
+```ts
+const budgets = new Map<string, Budget>();
+
+const budgetFor = (scope: string): Budget => {
+  const existing = budgets.get(scope);
+  if (existing !== undefined) return existing;
+  const created = createBudget({ limit: 5, scope, onBudgetExceeded: alert });
+  budgets.set(scope, created);
+  return created;
+};
+```
+
+**Totals live in memory and die with the process.** There is no database, file
+or network call anywhere in this module, so a budget only ever knows about spend
+made in the current process. Restart the worker and the totals are gone. Persist
+your own running totals if you need them to survive a restart.
+
+### Estimated costs are approximate
+
+`estimateCost` reports `estimated: true` when the token count is a heuristic or
+the pricing came from the bundled snapshot (see [Usage](#usage)). A budget fed
+such a cost is only as accurate as that cost, and the flag is passed through to
+both the callback and the error so the two cases stay distinguishable:
+
+```ts
+const result = await estimateCost({ model: 'claude-sonnet-4-5', inputText: 'Hello' });
+result.estimated; // true  <- heuristic token count
+
+budget.track(result); // the budget is only as precise as `result.cost`
+```
+
+A hard cap on an estimated cost is a guardrail, not an exact ceiling: the real
+charge can land just under or just over the limit. Use it to stop requests that
+are clearly too large, and keep your own ledger if you need exact accounting.
+
+### Budget API
+
+| Member | Description |
+| --- | --- |
+| `createBudget(options)` | `{ limit, mode?, scope?, onBudgetExceeded? }` |
+| `budget.track(spend)` | Charges a cost. Fires the callback in soft mode, throws in hard mode |
+| `budget.check(spend)` | Previews a cost. Never records and never calls back |
+| `budget.getTotal()` | Everything charged so far; can exceed `limit` in soft mode |
+| `budget.getRemaining()` | `limit - getTotal()`, negative once exceeded |
+| `budget.isExceeded()` | Whether the tracked total is past the limit |
+| `budget.reset()` | Clears the total and re-arms the callback; keeps limit and mode |
+| `BudgetExceededError` | `code: 'BUDGET_EXCEEDED'`, plus `limit`, `total`, `cost`, `scope`, `estimated` |
+
+`track` and `check` take an `estimateCost` result directly, or any
+`{ cost, currency, estimated }`. A negative or non-finite `cost` is rejected with
+`InvalidInputError` rather than quietly corrupting a total, and one budget will
+not mix currencies.
+
 ## Tokenizer accuracy
 
 `js-tiktoken` gives **exact** counts for OpenAI models (`gpt-4o`, `gpt-5`,
@@ -288,8 +394,10 @@ src/
 │   ├── lookup.ts            model-id -> pricing entry
 │   ├── units.ts             per-token / per-1K / per-1M normalization
 │   └── snapshot.json        bundled offline pricing (~3.6k models)
-├── budget/guardrails.ts     reserved; not implemented yet
-├── cli.ts                   bin entry: I/O, exit codes
+├── budget/
+│   ├── guardrails.ts          createBudget: soft/hard cap, per-scope totals
+│   └── types.ts               Budget and charge shapes
+├── cli.ts                     bin entry: I/O, exit codes
 ├── cli-args.ts              pure argument parsing
 └── cli-format.ts            pure table / JSON formatting
 ```
@@ -381,7 +489,7 @@ publish has succeeded.
 | 0 | Repo, tooling, dual-build, CI, packaging | Done |
 | 1 | Tokenizers + pricing + `estimateCost` | Done |
 | 2 | CLI | Done |
-| 2b | Budget guardrails | Next |
+| 2b | Budget guardrails | Done |
 | 2c | Provider-aware tokenizers (Anthropic + OpenAI prefix table) | Done |
 | 4 | Automation: CI, scheduled pricing PRs, tag-gated npm publish | Done |
 | 3 | Stable release, docs site | Planned |
