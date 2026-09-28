@@ -1,6 +1,6 @@
 {
   "name": "llm-token-cost",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Estimate LLM token counts and costs from raw prompt/completion text. Modern, zero-runtime-dependency successor to llm-cost.",
   "keywords": [
     "llm",
