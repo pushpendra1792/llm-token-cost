@@ -2,25 +2,114 @@
 
 [![CI](https://github.com/pushpendra1792/llm-token-cost/actions/workflows/ci.yml/badge.svg)](https://github.com/pushpendra1792/llm-token-cost/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/llm-token-cost.svg)](https://www.npmjs.com/package/llm-token-cost)
+[![npm license](https://img.shields.io/npm/l/llm-token-cost.svg)](https://www.npmjs.com/package/llm-token-cost)
 
-> **Status: v1 core (Phase 1), CLI (Phase 2) and budget guardrails shipped, API
-> unstable.** See [Roadmap](#roadmap).
+> **Status: phases 0-5 shipped** — tokenizers and pricing, CLI, budget
+> guardrails, and the CI and publish automation. The package is at `0.1.0` and
+> the API is not frozen, so expect breaking changes before `1.0`. See
+> [Roadmap](#roadmap).
 
 Estimate LLM token counts and costs from raw prompt/completion text. A modern,
 maintained successor to the stale [`llm-cost`](https://www.npmjs.com/package/llm-cost)
-package (last published 2024, pinned to `tiktoken@^1`).
+package (last released 2024-07-19, pinned to `tiktoken@^1`).
 
 ## Why
 
-`llm-cost` is effectively unmaintained: its last release was over a year ago, it
-hard-depends on `tiktoken@^1`, and it has no Anthropic or Google pricing, no
-typed API, and no ESM build. `llm-token-cost` aims to fix each of those.
+`llm-cost` is effectively unmaintained. Its last release was `1.0.5` on
+2024-07-19, nothing since, and it has some specific problems that matter when
+you are pricing spend:
+
+- it hard-depends on `tiktoken@^1`, the stale CommonJS line;
+- it ships CommonJS only — no ESM build, no `exports` map;
+- its price table is a LiteLLM snapshot frozen at that 2024-07 publish, holding
+  466 models. `gpt-5`, `gpt-5.1` and `claude-sonnet-4-5` are not in it, and its
+  lookup is an exact key match, so those return `cost: undefined`;
+- for any model missing from its three-entry tokenizer table it silently falls
+  back to the `gpt-3.5-turbo` encoder. It does print a warning, but the result
+  carries no flag, so a Claude price computed from OpenAI token counts is
+  indistinguishable from a correct one at the call site;
+- there is no way to ask how accurate a number is, and no spend or budget API.
+
+`llm-token-cost` addresses each of those.
+
+## Comparison
+
+Checked on 2026-09-28 against the npm registry, the PyPI JSON API and each
+project's public source. A cell reading "unverified" was not confirmed and is
+not claimed either way.
+
+| | **llm-token-cost** | **llm-cost** | **tiktoken** (PyPI) | **litellm** (PyPI) |
+| --- | --- | --- | --- | --- |
+| Latest version | 0.1.0 | 1.0.5 | 0.14.0 | 1.103.0 |
+| Last release | 2026-09-28 | 2024-07-19 | 2026-08-17 | 2026-09-27 |
+| License | MIT | MIT | MIT | MIT |
+| Runtime | Node >= 20 | Node, no `engines` field | Python >= 3.9 | Python >= 3.10, < 3.15 |
+| Module format | ESM + CJS | CommonJS only | — | — |
+| Cost from raw text | yes | yes | no | no |
+| Cost from raw token counts | yes | yes | no | yes |
+| Anthropic / Google token counts | estimated, flagged | wrong tokenizer, unflagged | no | unverified |
+| Models priceable | 3,588 bundled, live-refreshable | 466, frozen since 2024-07 | none | own `model_prices` map |
+| Flags approximate results | yes, `estimated` | no | — | unverified |
+| Budget / spend API | yes, soft and hard cap | none | none | proxy-level spend tracking |
+| Direct dependencies | 1 | 1 | 2 | ~20, incl. `openai`, `boto3` |
+
+The row that decides most comparisons is **Anthropic / Google token counts**.
+`tiktoken` is OpenAI's tokenizer and Anthropic's documentation says it
+undercounts Claude by ~15-20% on typical text, so something has to correct for
+that. `llm-cost` does not: it applies a provider correction to the token count
+here, or says nothing at all there. See
+[Tokenizer accuracy](#tokenizer-accuracy).
+
+Both "cost from" rows are supported, and they are different jobs.
+`estimateCost` takes text, because counting tokens is the part that has to be
+right. When you already hold the counts — a provider's `usage` object from a
+response you just received, or a tokenizer you already depend on —
+`estimateCostFromTokens` prices them without tokenizing anything. See
+[Costing counts you already have](#costing-counts-you-already-have).
 
 ## Install
 
 ```bash
 npm install llm-token-cost
 ```
+
+Requires Node 20 or newer. The CLI ships inside the package, so there is nothing
+else to install:
+
+```bash
+npx llm-token-cost "summarize this article" --model gpt-4o
+```
+
+## Quick start
+
+```ts
+import { createBudget, estimateCost } from 'llm-token-cost';
+
+// 1. Estimate the request, before sending it.
+const estimate = await estimateCost({
+  model: 'gpt-4o',
+  inputText: 'Summarize this article in three bullet points.',
+  outputText: 'Here is the summary you requested.',
+});
+
+estimate.cost;      // 0.000095 USD
+estimate.estimated; // false
+
+// 2. Charge it to a budget, still before sending it.
+const budget = createBudget({ limit: 0.001, mode: 'hard', scope: 'user-123' });
+
+const preview = budget.check(estimate); // { wouldExceed: false, ... }
+if (preview.wouldExceed) return useCheaperModel();
+
+budget.track(estimate); // commits the cost; in hard mode this throws instead
+
+// 3. Only now is it safe to spend.
+const completion = await callTheModel({ model: 'gpt-4o', inputText, outputText });
+```
+
+The ordering is the point: estimate, check, send. Both budget steps happen
+before the request leaves, which is the only point at which a budget can still
+stop it. See [Budget guardrails](#budget-guardrails).
 
 ## CLI
 
@@ -136,6 +225,45 @@ await estimateCost({ model: 'claude-sonnet-4-5', inputText: 'Hello' });
 Model ids are forgiving. `gpt-4o`, `GPT-4O`, `azure/gpt-4o` and
 `ft:gpt-4o-2024-08-06` all resolve to the same pricing.
 
+### Costing counts you already have
+
+When the token counts already exist — a provider's `usage` object from a
+response you just received, or a count from a tokenizer you already depend on —
+`estimateCostFromTokens` prices them without tokenizing anything:
+
+```ts
+import { estimateCostFromTokens } from 'llm-token-cost';
+
+const result = await estimateCostFromTokens({
+  model: 'claude-sonnet-4-5',
+  inputTokens: response.usage.input_tokens,  // 1200
+  outputTokens: response.usage.output_tokens, // 340
+});
+
+result.cost;      // 0.0087
+result.estimated; // false
+```
+
+It is async and resolves pricing exactly like `estimateCost` — live feed, then
+fresh cache, then the bundled snapshot — and throws the same
+`UnknownModelError` for a model it cannot price. The counts are used verbatim:
+nothing is rounded, scaled or corrected, so a count from any source costs the
+same. Negative, fractional and non-finite counts are rejected with
+`InvalidInputError` rather than priced.
+
+`estimated` means something narrower here than in `estimateCost`. It reports
+**the pricing only** — it is `false` for a Claude model with live prices, where
+`estimateCost` on the same model reports `true`. There is no tokenizer in the
+path, so the flag has nothing to say about the counts. You are the one who knows
+whether they are exact: a provider's `usage` is, a hand-rolled count is not.
+
+The result feeds a [budget](#budget-guardrails) directly, exactly as an
+`estimateCost` result does:
+
+```ts
+budget.track(result);
+```
+
 ### Errors
 
 An unrecognized model throws a typed error rather than returning a guess:
@@ -203,6 +331,43 @@ overspends. A spend that lands exactly on the limit does not count as crossed.
 
 `hard` mode reports by throwing rather than calling back, and the error carries
 the same fields, so log from the `catch` if you want a trail.
+
+### Check before you send
+
+`check` and `track` are two separate steps, and both belong **before** the
+request leaves. That ordering is the whole point of a budget: once a call is in
+flight, stopping it is not something this library can do.
+
+```ts
+const estimate = await estimateCost({ model, inputText, outputText });
+
+const preview = budget.check(estimate);   // 1. preview: affordable at all?
+if (preview.wouldExceed) return useCheaperModel();
+
+budget.track(estimate);                    // 2. commit; hard mode throws here
+const completion = await callTheModel({ model, inputText, outputText }); // 3. spend
+```
+
+In `hard` mode `track` is the enforcement point, and it is synchronous, so
+concurrent `track` calls cannot interleave: each one sees the total left by the
+others, and the request that would cross the limit is the one that throws.
+
+`check` is only a preview. It reads the total as it stands at that instant, so
+if you `await` anything between `check` and `track`, another request can spend
+in the gap and your decision rests on a stale number. Treat `wouldExceed: false`
+as advice, not a reservation: `track` is what commits, and `check` is for
+choosing what to do next.
+
+Two ways a hard cap can still be passed in practice:
+
+- **In-flight requests.** A cap stops the *next* request. It does not recall the
+  ones already sent, so a burst of concurrent calls can all be approved before
+  the total crosses the limit. For a strict ceiling, reserve the whole batch up
+  front or serialize `track` behind your own queue.
+- **Estimated costs.** The cap is enforced against `estimate.cost`, not the
+  provider's real charge. When `estimated` is `true` the real cost can land on
+  either side of the limit. See
+  [Estimated costs are approximate](#estimated-costs-are-approximate).
 
 ### Scoped budgets
 
@@ -371,6 +536,9 @@ not.** Expect any single estimate to be off by up to ~40%, in either direction.
 `chars / 4` has a similar MAPE but no CJK handling and a much worse tail, and
 pure word-ratio scaling is bad enough to reject outright.
 
+Full numbers, known weak spots and how to re-derive them:
+[docs/BENCHMARK.md](./docs/BENCHMARK.md).
+
 If you need exact numbers, read the `usage` object the provider returns. This
 library is for the question that comes *before* the request: should this be
 allowed to run at all?
@@ -380,7 +548,7 @@ allowed to run at all?
 ```
 src/
 ├── index.ts                 public API
-├── estimate.ts              estimateCost
+├── estimate.ts              estimateCost, estimateCostFromTokens
 ├── errors.ts                typed error classes
 ├── model-id.ts              shared model-id normalization
 ├── tokenizers/
@@ -415,6 +583,10 @@ behind a proxy, in an air-gapped setup, or for pinning a known-good payload. The
 `getPricing` `url` option takes precedence over the env var.
 
 ## Development
+
+Requires **Node 20.19+** (or 22.12+). That floor comes from the native bindings
+behind `vitest`, which declare `^20.19.0 || >=22.12.0`. CI runs the suite
+against Node 20 and 22.
 
 ```bash
 npm install
@@ -492,15 +664,16 @@ publish has succeeded.
 | 2b | Budget guardrails | Done |
 | 2c | Provider-aware tokenizers (Anthropic + OpenAI prefix table) | Done |
 | 4 | Automation: CI, scheduled pricing PRs, tag-gated npm publish | Done |
-| 3 | Stable release, docs site | Planned |
+| 5 | Docs: comparison, benchmark write-up, contributor setup | Done |
+| 3 | Stable `1.0` release, docs site | Planned |
 
-The MAPE and p95 figures in [Tokenizer accuracy](#tokenizer-accuracy) are
-**offline measurements from a 90-sample corpus**, not a build-time gate: that
-corpus is not checked into the repo, so the test suite does not re-derive them.
-The Anthropic correction factors and the 4.7 boundary *are* pinned by tests, and
-the blend has unit tests, but a regression in aggregate accuracy would not fail
-the build. Treat the table as a one-time measurement and re-run the calibration
-if the blend changes.
+The MAPE and p95 figures in [Tokenizer accuracy](#tokenizer-accuracy) and in
+[docs/BENCHMARK.md](./docs/BENCHMARK.md) are **offline measurements from a
+90-sample corpus**, not a build-time gate: that corpus is not checked into the
+repo, so the test suite does not re-derive them. The Anthropic correction factors
+and the 4.7 boundary *are* pinned by tests, and the blend has unit tests, but a
+regression in aggregate accuracy would not fail the build. Treat the numbers as a
+one-time measurement and re-run the calibration if the blend changes.
 
 ## License
 

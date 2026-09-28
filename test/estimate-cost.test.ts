@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { InvalidInputError, LlmTokenCostError, UnknownModelError } from '../src/errors';
-import { estimateCost } from '../src/estimate';
+import { createBudget } from '../src/budget/guardrails';
+import { BudgetExceededError, InvalidInputError, LlmTokenCostError, UnknownModelError } from '../src/errors';
+import { estimateCost, estimateCostFromTokens } from '../src/estimate';
 import { resetPricingCache, setPricingFetch } from '../src/pricing/fetch';
 import { PRICING_CURRENCY } from '../src/pricing/types';
 import { resolveTokenizer } from '../src/tokenizers';
@@ -288,5 +289,223 @@ describe('estimateCost error handling', () => {
     await expect(
       estimateCost({ model: 'gpt-4o', inputText: 42 as unknown as string }),
     ).rejects.toThrow(InvalidInputError);
+  });
+});
+
+describe('estimateCostFromTokens', () => {
+  it('costs counts as given, with no tokenizing and no rounding', async () => {
+    liveFetch();
+
+    const result = await estimateCostFromTokens({
+      model: 'gpt-4o',
+      inputTokens: 1000,
+      outputTokens: 500,
+    });
+
+    expect(result).toEqual({
+      inputTokens: 1000,
+      outputTokens: 500,
+      cost: 1000 * 0.0000025 + 500 * 0.00001,
+      currency: PRICING_CURRENCY,
+      estimated: false,
+    });
+  });
+
+  it('reports estimated false for any model when pricing is live, since no tokenizer is involved', async () => {
+    liveFetch();
+
+    const result = await estimateCostFromTokens({
+      model: 'claude-sonnet-4-5',
+      inputTokens: 100,
+      outputTokens: 100,
+    });
+
+    // The same call through estimateCost would be estimated: true, because
+    // Claude has no published tokenizer. Here the counts came from the caller.
+    expect(result.estimated).toBe(false);
+    expect(result.cost).toBeCloseTo(100 * 0.000003 + 100 * 0.000015, 15);
+  });
+
+  it('agrees with estimateCost on price for the same token counts', async () => {
+    liveFetch();
+
+    const counted = await estimateCostFromTokens({ model: 'gpt-4o', inputTokens: 7, outputTokens: 3 });
+    const countedAgain = await estimateCostFromTokens({ model: 'gpt-4o', inputTokens: 7, outputTokens: 3 });
+
+    expect(counted.cost).toBe(countedAgain.cost);
+    expect(counted.cost).toBeCloseTo(7 * 0.0000025 + 3 * 0.00001, 15);
+  });
+
+  it('treats omitted outputTokens as zero', async () => {
+    liveFetch();
+
+    const result = await estimateCostFromTokens({ model: 'gpt-4o', inputTokens: 10 });
+
+    expect(result.outputTokens).toBe(0);
+    expect(result.cost).toBeCloseTo(10 * 0.0000025, 15);
+  });
+
+  it('accepts zero counts and prices a free request at zero', async () => {
+    liveFetch();
+
+    const result = await estimateCostFromTokens({ model: 'gpt-4o', inputTokens: 0, outputTokens: 0 });
+
+    expect(result.cost).toBe(0);
+  });
+
+  it('keeps counts that a tokenizer would never produce', async () => {
+    liveFetch();
+
+    // An odd total is still a real provider count; nothing should "fix" it.
+    const result = await estimateCostFromTokens({ model: 'gpt-4o', inputTokens: 1 });
+
+    expect(result.inputTokens).toBe(1);
+    expect(result.cost).toBeCloseTo(0.0000025, 15);
+  });
+
+  it('resolves provider-prefixed model ids the same way', async () => {
+    liveFetch();
+
+    const plain = await estimateCostFromTokens({ model: 'gpt-4o', inputTokens: 500 });
+    const prefixed = await estimateCostFromTokens({ model: 'azure/gpt-4o', inputTokens: 500 });
+
+    expect(prefixed.cost).toBeCloseTo(plain.cost, 15);
+  });
+
+  it('marks the result estimated when pricing falls back to the snapshot', async () => {
+    offlineFetch();
+
+    const result = await estimateCostFromTokens({ model: 'gpt-4o', inputTokens: 1000 });
+
+    expect(result.estimated).toBe(true);
+    expect(result.cost).toBeGreaterThan(0);
+  });
+
+  it('prices a large count without overflowing', async () => {
+    liveFetch();
+
+    const result = await estimateCostFromTokens({
+      model: 'gpt-4o',
+      inputTokens: 2_000_000,
+      outputTokens: 200_000,
+    });
+
+    expect(Number.isFinite(result.cost)).toBe(true);
+    expect(result.cost).toBeCloseTo(2_000_000 * 0.0000025 + 200_000 * 0.00001, 6);
+  });
+
+  it('throws the same typed error for an unknown model', async () => {
+    liveFetch();
+
+    const thrown = await estimateCostFromTokens({
+      model: 'not-a-real-model-xyz',
+      inputTokens: 10,
+    }).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+
+    expect(thrown).toBeInstanceOf(UnknownModelError);
+    if (!(thrown instanceof UnknownModelError)) throw new Error('expected UnknownModelError');
+
+    expect(thrown).toBeInstanceOf(LlmTokenCostError);
+    expect(thrown.code).toBe('UNKNOWN_MODEL');
+    expect(thrown.model).toBe('not-a-real-model-xyz');
+  });
+
+  it('still throws for an unknown model when pricing falls back to the snapshot', async () => {
+    offlineFetch();
+
+    await expect(
+      estimateCostFromTokens({ model: 'not-a-real-model-xyz', inputTokens: 10 }),
+    ).rejects.toThrow(UnknownModelError);
+  });
+
+  it('rejects a blank model', async () => {
+    liveFetch();
+
+    await expect(estimateCostFromTokens({ model: '  ', inputTokens: 1 })).rejects.toThrow(InvalidInputError);
+  });
+
+  it('rejects negative counts', async () => {
+    liveFetch();
+
+    await expect(estimateCostFromTokens({ model: 'gpt-4o', inputTokens: -1 })).rejects.toThrow(
+      InvalidInputError,
+    );
+    await expect(
+      estimateCostFromTokens({ model: 'gpt-4o', inputTokens: 1, outputTokens: -5 }),
+    ).rejects.toThrow(InvalidInputError);
+  });
+
+  it('rejects NaN counts', async () => {
+    liveFetch();
+
+    await expect(
+      estimateCostFromTokens({ model: 'gpt-4o', inputTokens: Number.NaN }),
+    ).rejects.toThrow(InvalidInputError);
+    await expect(
+      estimateCostFromTokens({ model: 'gpt-4o', inputTokens: 1, outputTokens: Number.NaN }),
+    ).rejects.toThrow(InvalidInputError);
+  });
+
+  it('rejects non-integer counts', async () => {
+    liveFetch();
+
+    await expect(estimateCostFromTokens({ model: 'gpt-4o', inputTokens: 1.5 })).rejects.toThrow(
+      InvalidInputError,
+    );
+    await expect(
+      estimateCostFromTokens({ model: 'gpt-4o', inputTokens: 1, outputTokens: 0.5 }),
+    ).rejects.toThrow(InvalidInputError);
+  });
+
+  it('rejects infinite and non-numeric counts', async () => {
+    liveFetch();
+
+    await expect(
+      estimateCostFromTokens({ model: 'gpt-4o', inputTokens: Number.POSITIVE_INFINITY }),
+    ).rejects.toThrow(InvalidInputError);
+    await expect(
+      estimateCostFromTokens({ model: 'gpt-4o', inputTokens: '10' as unknown as number }),
+    ).rejects.toThrow(InvalidInputError);
+  });
+
+  it('rejects a bad count before attempting any pricing fetch', async () => {
+    const fetchSpy = vi.fn();
+    setPricingFetch(fetchSpy as unknown as typeof fetch);
+
+    await expect(estimateCostFromTokens({ model: 'gpt-4o', inputTokens: -1 })).rejects.toThrow(
+      InvalidInputError,
+    );
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('feeds a budget directly, like an estimateCost result', async () => {
+    liveFetch();
+    // 1000 in + 1000 out at gpt-4o rates is 0.0125, so 0.05 leaves headroom.
+    const budget = createBudget({ limit: 0.05, mode: 'hard', scope: 'user-123' });
+
+    const result = await estimateCostFromTokens({
+      model: 'gpt-4o',
+      inputTokens: 1000,
+      outputTokens: 1000,
+    });
+
+    // Structural typing is all that is required: no adapter, no repacking.
+    expect(budget.check(result).wouldExceed).toBe(false);
+    expect(() => budget.track(result)).not.toThrow();
+    expect(budget.getTotal()).toBeCloseTo(result.cost, 15);
+  });
+
+  it('lets a hard cap block a charge built from provider usage', async () => {
+    liveFetch();
+    const budget = createBudget({ limit: 0.0001, mode: 'hard' });
+
+    const result = await estimateCostFromTokens({ model: 'gpt-4o', inputTokens: 1_000_000 });
+
+    expect(() => budget.track(result)).toThrow(BudgetExceededError);
+    expect(budget.getTotal()).toBe(0);
   });
 });

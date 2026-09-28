@@ -1,5 +1,10 @@
-export { estimateCost } from './estimate';
-export type { EstimateCostInput, EstimateCostResult } from './estimate';
+export { estimateCost, estimateCostFromTokens } from './estimate';
+export type {
+  EstimateCostFromTokensInput,
+  EstimateCostFromTokensResult,
+  EstimateCostInput,
+  EstimateCostResult,
+} from './estimate';
 
 export {
   BudgetExceededError,
