@@ -324,7 +324,7 @@ remembering to do it by hand.
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
-| [`ci.yml`](./.github/workflows/ci.yml) | Every pull request, every push to `main` | `typecheck`, `test` and `build` on Node 18 and 22, then asserts the publish tarball contains no sources or tests |
+| [`ci.yml`](./.github/workflows/ci.yml) | Every pull request, every push to `main` | `typecheck`, `test` and `build` on Node 20 and 22, then asserts the publish tarball contains no sources or tests |
 | [`update-pricing.yml`](./.github/workflows/update-pricing.yml) | Weekly (Mondays 06:17 UTC) or manual | Regenerates the pricing snapshot and opens a pull request, but only if a price actually changed |
 | [`publish.yml`](./.github/workflows/publish.yml) | Push a `v*` tag | Typechecks, tests and builds, then publishes to npm with provenance and creates a GitHub release |
 

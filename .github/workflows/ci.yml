@@ -21,11 +21,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      # Brackets the declared engines floor (>=18.18) and current LTS. The
+      # Brackets the declared engines floor (>=20) and current LTS. The
       # package has no native dependencies, so more versions would cost CI
       # minutes without catching anything these two do not.
       matrix:
-        node: [18, 22]
+        node: [20, 22]
 
     steps:
       - uses: actions/checkout@v4

@@ -4,7 +4,7 @@ export default defineConfig([
   {
     entry: { index: 'src/index.ts' },
     format: ['esm', 'cjs'],
-    target: 'node18',
+    target: 'node20',
     platform: 'node',
     dts: true,
     sourcemap: true,
@@ -15,7 +15,7 @@ export default defineConfig([
   {
     entry: { cli: 'src/cli.ts' },
     format: ['esm'],
-    target: 'node18',
+    target: 'node20',
     platform: 'node',
     dts: false,
     sourcemap: true,
