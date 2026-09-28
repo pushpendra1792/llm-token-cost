@@ -1,11 +1,16 @@
 name: Update pricing snapshot
 
+# Weekly, off the hour to avoid the top-of-hour scheduling rush. The script is
+# byte-stable, so a week with no upstream price changes produces no diff and this
+# workflow exits without opening a pull request.
 on:
   schedule:
     - name: Weekly pricing refresh
       cron: '17 6 * * 1'
   workflow_dispatch:
 
+# Never cancel a refresh part-way: a cancelled run can leave a half-written
+# snapshot branch behind.
 concurrency:
   group: update-pricing
   cancel-in-progress: false
@@ -30,38 +35,56 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Detect pricing refresher
-        id: refresher
-        run: |
-          if node -p "!!(require('./package.json').scripts || {})['update:pricing']" | grep -q true; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::no update:pricing script yet - snapshot refresher lands in Phase 1"
-          fi
-
       - name: Refresh pricing snapshot
-        if: steps.refresher.outputs.available == 'true'
         run: npm run update:pricing
 
-      - name: Verify snapshot is present and well-formed
+      - name: Verify snapshot is well-formed
         run: |
-          test -f src/pricing/snapshot.json
-          node -e "
-            const s = require('./src/pricing/snapshot.json');
-            if (s.schemaVersion !== 1) throw new Error('unexpected schemaVersion: ' + s.schemaVersion);
-            if (typeof s.models !== 'object' || s.models === null) throw new Error('models must be an object');
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
+            const snapshot = JSON.parse(readFileSync('src/pricing/snapshot.json', 'utf8'));
+            if (snapshot.schemaVersion !== 1) throw new Error('unexpected schemaVersion: ' + snapshot.schemaVersion);
+            if (typeof snapshot.updatedAt !== 'string') throw new Error('updatedAt must be a string');
+            if (typeof snapshot.models !== 'object' || snapshot.models === null) throw new Error('models must be an object');
+            const models = Object.entries(snapshot.models);
+            if (models.length === 0) throw new Error('models is empty');
+            for (const [id, pricing] of models) {
+              for (const side of ['input', 'output']) {
+                const value = pricing[side];
+                if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+                  throw new Error('bad ' + side + ' price for ' + id + ': ' + value);
+                }
+              }
+            }
+            console.log(models.length + ' models, updatedAt ' + snapshot.updatedAt);
           "
 
+      - name: Detect pricing changes
+        id: changes
+        run: |
+          if git diff --quiet -- src/pricing/snapshot.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No pricing changes upstream. Snapshot left untouched." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Pricing changes"
+              echo ""
+              git --no-pager diff --stat -- src/pricing/snapshot.json
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # A refreshed snapshot is still a code change, so it has to pass the same
+      # gate as any other pull request before a human is asked to review it.
       - name: Verify build still passes
-        if: steps.refresher.outputs.available == 'true'
+        if: steps.changes.outputs.changed == 'true'
         run: |
           npm run typecheck
           npm run test
           npm run build
 
       - name: Open pull request
-        if: steps.refresher.outputs.available == 'true'
+        if: steps.changes.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           branch: chore/update-pricing
@@ -69,7 +92,9 @@ jobs:
           commit-message: 'chore(pricing): refresh pricing snapshot'
           title: 'chore(pricing): refresh pricing snapshot'
           body: |
-            Automated weekly refresh of `src/pricing/snapshot.json`.
+            Automated weekly refresh of `src/pricing/snapshot.json` from the
+            [LiteLLM pricing feed](https://github.com/BerriAI/litellm). No
+            pricing logic changed: `src/pricing/normalize.ts` is untouched.
 
             - [ ] Review newly added models
             - [ ] Review removed or deprecated models

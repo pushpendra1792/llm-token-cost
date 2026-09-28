@@ -1,5 +1,8 @@
 # llm-token-cost
 
+[![CI](https://github.com/pushpendra1792/llm-token-cost/actions/workflows/ci.yml/badge.svg)](https://github.com/pushpendra1792/llm-token-cost/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/llm-token-cost.svg)](https://www.npmjs.com/package/llm-token-cost)
+
 > **Status: v1 core (Phase 1) + CLI (Phase 2) shipped, API unstable.** The budget
 > guardrails are not implemented yet. See [Roadmap](#roadmap).
 
@@ -314,6 +317,63 @@ npm run update:pricing # refresh the bundled snapshot from LiteLLM
 npm run size           # inspect what would be published
 ```
 
+## Automation
+
+Three GitHub Actions workflows cover the work that should not depend on anyone
+remembering to do it by hand.
+
+| Workflow | Trigger | What it does |
+| --- | --- | --- |
+| [`ci.yml`](./.github/workflows/ci.yml) | Every pull request, every push to `main` | `typecheck`, `test` and `build` on Node 18 and 22, then asserts the publish tarball contains no sources or tests |
+| [`update-pricing.yml`](./.github/workflows/update-pricing.yml) | Weekly (Mondays 06:17 UTC) or manual | Regenerates the pricing snapshot and opens a pull request, but only if a price actually changed |
+| [`publish.yml`](./.github/workflows/publish.yml) | Push a `v*` tag | Typechecks, tests and builds, then publishes to npm with provenance and creates a GitHub release |
+
+### Pricing refreshes
+
+`npm run update:pricing` is byte-stable. Model keys are sorted and `updatedAt`
+records when the *data* last changed, not when the script last ran, so a week
+with no upstream price movement rewrites an identical file. The workflow finds no
+diff and exits without opening a pull request. When something did change, the new
+snapshot is schema-checked, put through the full test suite, and sent for review.
+Pricing never lands on `main` unattended.
+
+### Releasing
+
+npm publishing uses **trusted publishing** (OIDC) rather than a long-lived
+token: the registry mints a short-lived credential per run, so **no `NPM_TOKEN`
+secret has to be set on this repository**.
+
+The first release cannot use that flow, because a package must already exist on
+npm before it can be registered as a trusted publisher. Bootstrap it by hand once:
+
+```bash
+npm version 0.1.0 --no-git-tag-version   # no tag: a v* tag would fire publish.yml
+npm install
+npm run prepublishOnly                   # typecheck + test + build
+npm publish --access public              # prompts to log in
+```
+
+Then commit and push that version bump, and on npmjs.com add a trusted publisher
+under the package's settings:
+
+| Field | Value |
+| --- | --- |
+| Organization or user account | your npm account |
+| Repository | `pushpendra1792/llm-token-cost` |
+| Workflow filename | `publish.yml` |
+| Environment | leave blank |
+
+Every release after that is a single command:
+
+```bash
+npm version 0.1.1        # bumps package.json, tags v0.1.1, pushes the tag
+```
+
+That tag runs `publish.yml`, which refuses to continue if the tag disagrees with
+the `package.json` version, if any check fails, or if the version is already on
+npm. The GitHub release is created by a follow-on job that only runs once the
+publish has succeeded.
+
 ## Roadmap
 
 | Phase | Contents | Status |
@@ -323,6 +383,7 @@ npm run size           # inspect what would be published
 | 2 | CLI | Done |
 | 2b | Budget guardrails | Next |
 | 2c | Provider-aware tokenizers (Anthropic + OpenAI prefix table) | Done |
+| 4 | Automation: CI, scheduled pricing PRs, tag-gated npm publish | Done |
 | 3 | Stable release, docs site | Planned |
 
 The MAPE and p95 figures in [Tokenizer accuracy](#tokenizer-accuracy) are

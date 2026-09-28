@@ -1,10 +1,15 @@
 name: CI
 
+# Every pull request, plus pushes to main. Pushes to a branch that already has
+# an open pull request are covered by the `pull_request` run, so triggering on
+# those too would only duplicate the same commit for no extra signal.
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -16,8 +21,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # Brackets the declared engines floor (>=18.18) and current LTS. The
+      # package has no native dependencies, so more versions would cost CI
+      # minutes without catching anything these two do not.
       matrix:
-        node: [20, 22, 24]
+        node: [18, 22]
 
     steps:
       - uses: actions/checkout@v4
@@ -58,12 +66,21 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Inspect tarball
-        run: npm pack --dry-run
-
-      - name: Fail if sources leak into the tarball
+      - name: Fail if sources or tests leak into the tarball
         run: |
-          if npm pack --dry-run --json | grep -qE 'src/|test/|\.ts$'; then
-            echo "::error::source or test files would be published"
-            exit 1
-          fi
+          npm pack --dry-run --json > pack.json
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
+            const [tarball] = JSON.parse(readFileSync('pack.json', 'utf8'));
+            // .d.ts files are build output that package.json points 'types' at,
+            // so only hand-written .ts sources count as a leak.
+            const leaked = tarball.files
+              .map((file) => file.path)
+              .filter((path) => /^(src|test)\//.test(path) || (path.endsWith('.ts') && !path.endsWith('.d.ts')));
+            if (leaked.length > 0) {
+              console.error('::error::would publish source or test files: ' + leaked.join(', '));
+              process.exit(1);
+            }
+            const kib = (tarball.unpackedSize / 1024).toFixed(0);
+            console.log(tarball.files.length + ' files, ' + kib + ' KiB unpacked');
+          "
