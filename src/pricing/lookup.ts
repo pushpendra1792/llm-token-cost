@@ -19,9 +19,15 @@ const indexFor = (table: PricingTable): ReadonlyMap<string, string> => {
 /**
  * Resolves a user-supplied model id to a pricing entry.
  *
- * Tries exact candidates first (preserving any provider prefix), then falls
- * back to a case-insensitive match, so `GPT-4O`, `azure/gpt-4o` and
- * `ft:gpt-4o-2024-08-06` all resolve to the same underlying pricing.
+ * Walks `modelIdCandidates` most specific first: the id as given, then the
+ * `ft:`-stripped form, then progressively stripped provider prefixes. Within
+ * each candidate an exact key match wins over a case-insensitive one, so
+ * `GPT-4O` and `azure/gpt-4o` both reach the pricing `gpt-4o` is charged.
+ *
+ * That order is what keeps a fine-tuned id honest. `ft:gpt-4o-2024-08-06`
+ * has its own entry at its own rate, and the exact key is tried before the
+ * stripped `gpt-4o-2024-08-06` is considered at all. A fine-tune is only
+ * priced as the model it was cut from when the feed has no entry for it.
  */
 export const findModelPricing = (
   table: PricingTable,
