@@ -1,5 +1,6 @@
 export { estimateCost, estimateCostFromTokens } from './estimate';
 export type {
+  EstimateCostBreakdown,
   EstimateCostFromTokensInput,
   EstimateCostFromTokensResult,
   EstimateCostInput,
@@ -50,4 +51,11 @@ export type { GetPricingOptions } from './pricing/fetch';
 export { findModelPricing } from './pricing/lookup';
 export { normalizeLiteLLMPricing } from './pricing/normalize';
 export { PRICING_CURRENCY } from './pricing/types';
-export type { ModelPricing, PricingSource, PricingTable, ResolvedPricing } from './pricing/types';
+export type {
+  CacheTtl,
+  ModelPricing,
+  PricingSource,
+  PricingTable,
+  ResolvedPricing,
+  ServiceTier,
+} from './pricing/types';

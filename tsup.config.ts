@@ -22,6 +22,9 @@ export default defineConfig([
     clean: false,
     splitting: false,
     treeshake: true,
+    // Share the ESM library build instead of embedding a second copy of the
+    // snapshot. The CLI runs from dist/cli.js, next to dist/index.js.
+    external: ['./index.js'],
     banner: { js: '#!/usr/bin/env node' },
   },
 ]);

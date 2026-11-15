@@ -1,8 +1,16 @@
 import { InvalidInputError, UnknownModelError } from './errors';
 import { findModelPricing } from './pricing/lookup';
 import { getPricing, type GetPricingOptions } from './pricing/fetch';
-import { PRICING_CURRENCY, type ModelPricing } from './pricing/types';
+import {
+  PRICING_CURRENCY,
+  type CacheTtl,
+  type ModelPricing,
+  type ServiceTier,
+} from './pricing/types';
 import { resolveTokenizer } from './tokenizers';
+
+const SERVICE_TIERS: ReadonlyArray<ServiceTier> = ['standard', 'batch', 'flex', 'priority'];
+const CACHE_TTLS: ReadonlyArray<CacheTtl> = ['5m', '1h'];
 
 /**
  * Validates a model id before any pricing lookup happens.
@@ -116,20 +124,47 @@ export const estimateCost = async (
   };
 };
 
+/** Per-category cost in `currency`, always summing to `cost`. */
+export interface EstimateCostBreakdown {
+  /** Cost of regular (uncached) input tokens. */
+  readonly input: number;
+  /** Cost of cache-read input tokens. */
+  readonly cacheRead: number;
+  /** Cost of cache-creation (write) input tokens. */
+  readonly cacheCreation: number;
+  /** Cost of regular (non-reasoning) output tokens. */
+  readonly output: number;
+  /** Cost of reasoning/thinking output tokens. */
+  readonly reasoning: number;
+}
+
 export interface EstimateCostFromTokensInput {
   /** Model id, e.g. `gpt-4o`, `azure/gpt-4o`, `claude-sonnet-4-5`. */
   readonly model: string;
-  /** Whole number of input tokens, from a tokenizer or a provider's `usage`. */
+  /**
+   * Whole number of input tokens, from a tokenizer or a provider's `usage`.
+   * This is the *total*, including any cached tokens reported separately.
+   */
   readonly inputTokens: number;
   /** Omit to price a prompt with no completion. */
   readonly outputTokens?: number;
+  /** Subset of `inputTokens` served from a prompt cache. */
+  readonly cacheReadInputTokens?: number;
+  /** Subset of `inputTokens` written to a prompt cache. */
+  readonly cacheCreationInputTokens?: number;
+  /** Subset of `outputTokens` spent on reasoning/thinking. */
+  readonly reasoningOutputTokens?: number;
+  /** Billing tier for the whole request. Defaults to `standard`. */
+  readonly serviceTier?: ServiceTier;
+  /** Cache TTL used to select the cache-write price. Defaults to `5m`. */
+  readonly cacheTtl?: CacheTtl;
 }
 
 export interface EstimateCostFromTokensResult {
   /** The counts as supplied. Nothing here is re-counted or corrected. */
   readonly inputTokens: number;
   readonly outputTokens: number;
-  /** Total cost in `currency`. */
+  /** Total cost in `currency`. Equals the sum of `breakdown` when present. */
   readonly cost: number;
   readonly currency: string;
   /**
@@ -143,7 +178,78 @@ export interface EstimateCostFromTokensResult {
    * is not.
    */
   readonly estimated: boolean;
+  /**
+   * Per-category costs. Present only when at least one breakdown input
+   * (`cacheReadInputTokens`, `cacheCreationInputTokens`, or
+   * `reasoningOutputTokens`) was supplied.
+   */
+  readonly breakdown?: EstimateCostBreakdown;
+  /**
+   * Human-readable notes about prices that fell back to another rate because
+   * the model does not publish the requested price. Absent when every price
+   * used was the one requested.
+   */
+  readonly warnings?: string[];
 }
+
+const assertOptionalTokenCount = (value: number | undefined, field: string): void => {
+  if (value !== undefined) assertTokenCount(value, field);
+};
+
+function assertServiceTier(value: unknown): asserts value is ServiceTier {
+  if (!SERVICE_TIERS.includes(value as ServiceTier)) {
+    throw new InvalidInputError(`\`serviceTier\` must be one of: ${SERVICE_TIERS.join(', ')}`);
+  }
+}
+
+function assertCacheTtl(value: unknown): asserts value is CacheTtl {
+  if (!CACHE_TTLS.includes(value as CacheTtl)) {
+    throw new InvalidInputError(`\`cacheTtl\` must be one of: ${CACHE_TTLS.join(', ')}`);
+  }
+}
+
+interface ResolvedTier {
+  readonly input: number;
+  readonly output: number;
+  readonly warnings: string[];
+}
+
+/**
+ * Selects the input/output prices for the requested service tier, falling back
+ * to the standard price per side when the model has no price for that tier.
+ */
+const resolveTierPricing = (
+  model: string,
+  pricing: ModelPricing,
+  tier: ServiceTier,
+): ResolvedTier => {
+  if (tier === 'standard') {
+    return { input: pricing.input, output: pricing.output, warnings: [] };
+  }
+
+  const tierInput =
+    tier === 'batch' ? pricing.inputBatch : tier === 'flex' ? pricing.inputFlex : pricing.inputPriority;
+  const tierOutput =
+    tier === 'batch' ? pricing.outputBatch : tier === 'flex' ? pricing.outputFlex : pricing.outputPriority;
+
+  const warnings: string[] = [];
+  let input = pricing.input;
+  let output = pricing.output;
+
+  if (tierInput !== undefined) {
+    input = tierInput;
+  } else {
+    warnings.push(`No ${tier} input price for ${model}; using the standard input price.`);
+  }
+
+  if (tierOutput !== undefined) {
+    output = tierOutput;
+  } else {
+    warnings.push(`No ${tier} output price for ${model}; using the standard output price.`);
+  }
+
+  return { input, output, warnings };
+};
 
 /**
  * Costs token counts you already have, without tokenizing anything.
@@ -154,6 +260,11 @@ export interface EstimateCostFromTokensResult {
  * resolves pricing exactly the same way, so both estimators agree on price and
  * on the errors they throw.
  *
+ * `inputTokens` and `outputTokens` are totals. Cache and reasoning counts are
+ * optional *subsets* of those totals: cached input is billed at its own rate,
+ * reasoning output at its own rate, and the remainder at the normal rates. A
+ * subset larger than its total is rejected rather than clamped.
+ *
  * Counts are used verbatim. Nothing is rounded, scaled or corrected, so a
  * count from any source costs the same here. Non-finite, fractional and
  * negative counts are rejected with {@link InvalidInputError}, and an unknown
@@ -163,15 +274,101 @@ export const estimateCostFromTokens = async (
   input: EstimateCostFromTokensInput,
   options: GetPricingOptions = {},
 ): Promise<EstimateCostFromTokensResult> => {
-  const { model, inputTokens, outputTokens = 0 } = input;
+  const {
+    model,
+    inputTokens,
+    outputTokens = 0,
+    cacheReadInputTokens = 0,
+    cacheCreationInputTokens = 0,
+    reasoningOutputTokens = 0,
+    serviceTier = 'standard',
+    cacheTtl = '5m',
+  } = input;
 
   assertModel(model);
   assertTokenCount(inputTokens, 'inputTokens');
   assertTokenCount(outputTokens, 'outputTokens');
+  assertOptionalTokenCount(input.cacheReadInputTokens, 'cacheReadInputTokens');
+  assertOptionalTokenCount(input.cacheCreationInputTokens, 'cacheCreationInputTokens');
+  assertOptionalTokenCount(input.reasoningOutputTokens, 'reasoningOutputTokens');
+  assertServiceTier(serviceTier);
+  assertCacheTtl(cacheTtl);
+
+  if (cacheReadInputTokens + cacheCreationInputTokens > inputTokens) {
+    throw new InvalidInputError(
+      '`cacheReadInputTokens` + `cacheCreationInputTokens` must not exceed `inputTokens`',
+    );
+  }
+  if (reasoningOutputTokens > outputTokens) {
+    throw new InvalidInputError('`reasoningOutputTokens` must not exceed `outputTokens`');
+  }
 
   const { modelPricing, estimated } = await resolveModelPricing(model, options);
 
-  const cost = inputTokens * modelPricing.input + outputTokens * modelPricing.output;
+  const tier = resolveTierPricing(model, modelPricing, serviceTier);
+  const warnings = [...tier.warnings];
+
+  // Cache reads: use the published cache-read price, else the normal input rate.
+  const cacheReadPrice = modelPricing.cacheReadInput ?? tier.input;
+  if (modelPricing.cacheReadInput === undefined && cacheReadInputTokens > 0) {
+    warnings.push(`No cache read price for ${model}; using the normal input price.`);
+  }
+
+  // Cache writes: TTL selects the price; a missing 1h price falls back to 5m.
+  let cacheCreationPrice: number;
+  if (cacheTtl === '1h') {
+    if (modelPricing.cacheCreationInputAbove1hr !== undefined) {
+      cacheCreationPrice = modelPricing.cacheCreationInputAbove1hr;
+    } else if (modelPricing.cacheCreationInput !== undefined) {
+      cacheCreationPrice = modelPricing.cacheCreationInput;
+      if (cacheCreationInputTokens > 0) {
+        warnings.push(
+          `No 1-hour cache creation price for ${model}; using the 5-minute cache write price.`,
+        );
+      }
+    } else {
+      cacheCreationPrice = tier.input;
+      if (cacheCreationInputTokens > 0) {
+        warnings.push(`No cache creation price for ${model}; using the normal input price.`);
+      }
+    }
+  } else if (modelPricing.cacheCreationInput !== undefined) {
+    cacheCreationPrice = modelPricing.cacheCreationInput;
+  } else {
+    cacheCreationPrice = tier.input;
+    if (cacheCreationInputTokens > 0) {
+      warnings.push(`No cache creation price for ${model}; using the normal input price.`);
+    }
+  }
+
+  // Reasoning: use the published reasoning price, else the normal output rate.
+  const reasoningPrice = modelPricing.outputReasoning ?? tier.output;
+  if (modelPricing.outputReasoning === undefined && reasoningOutputTokens > 0) {
+    warnings.push(`No reasoning price for ${model}; using the normal output price.`);
+  }
+
+  const regularInputTokens = inputTokens - cacheReadInputTokens - cacheCreationInputTokens;
+  const regularOutputTokens = outputTokens - reasoningOutputTokens;
+
+  const breakdown: EstimateCostBreakdown = {
+    input: regularInputTokens * tier.input,
+    cacheRead: cacheReadInputTokens * cacheReadPrice,
+    cacheCreation: cacheCreationInputTokens * cacheCreationPrice,
+    output: regularOutputTokens * tier.output,
+    reasoning: reasoningOutputTokens * reasoningPrice,
+  };
+
+  const cost =
+    breakdown.input +
+    breakdown.cacheRead +
+    breakdown.cacheCreation +
+    breakdown.output +
+    breakdown.reasoning;
+
+  const wantsBreakdown =
+    input.cacheReadInputTokens !== undefined ||
+    input.cacheCreationInputTokens !== undefined ||
+    input.reasoningOutputTokens !== undefined;
 
   return {
     inputTokens,
@@ -180,5 +377,7 @@ export const estimateCostFromTokens = async (
     currency: PRICING_CURRENCY,
     // Pricing only: the counts are the caller's, and are used as given.
     estimated,
+    ...(wantsBreakdown ? { breakdown } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 };

@@ -19,6 +19,26 @@ interface RawModelEntry {
   readonly input_cost_per_1m_tokens?: unknown;
   readonly output_cost_per_1m_tokens?: unknown;
   readonly litellm_provider?: unknown;
+
+  // Cache pricing
+  readonly cache_read_input_token_cost?: unknown;
+  readonly cache_creation_input_token_cost?: unknown;
+  readonly cache_creation_input_token_cost_above_1hr?: unknown;
+
+  // Service tier pricing
+  readonly input_cost_per_token_batches?: unknown;
+  readonly output_cost_per_token_batches?: unknown;
+  readonly input_cost_per_token_flex?: unknown;
+  readonly output_cost_per_token_flex?: unknown;
+  readonly input_cost_per_token_priority?: unknown;
+  readonly output_cost_per_token_priority?: unknown;
+
+  // Reasoning pricing
+  readonly output_cost_per_reasoning_token?: unknown;
+
+  // Context limits
+  readonly max_input_tokens?: unknown;
+  readonly max_output_tokens?: unknown;
 }
 
 /** Non-model keys that LiveLLM's document carries at the top level. */
@@ -52,6 +72,15 @@ const readPrice = (entry: RawModelEntry, kind: 'input' | 'output'): number | und
 };
 
 /**
+ * Reads a simple per-token price field (no unit variants) from the raw entry.
+ * Returns undefined if the field is missing, not a number, or negative.
+ */
+const readSimplePrice = (entry: RawModelEntry, field: keyof RawModelEntry): number | undefined => {
+  const value = entry[field];
+  return asFiniteNumber(value);
+};
+
+/**
  * Converts one raw entry, or returns `undefined` when it cannot yield both an
  * input and an output price.
  *
@@ -63,14 +92,54 @@ export const normalizeModelEntry = (raw: unknown): ModelPricing | undefined => {
   const record = asRecord(raw);
   if (record === undefined) return undefined;
 
-  const input = readPrice(record as RawModelEntry, 'input');
-  const output = readPrice(record as RawModelEntry, 'output');
+  const entry = record as RawModelEntry;
+
+  const input = readPrice(entry, 'input');
+  const output = readPrice(entry, 'output');
   if (input === undefined || output === undefined) return undefined;
 
   const providerValue = record['litellm_provider'];
   const provider = typeof providerValue === 'string' ? providerValue : undefined;
 
-  return provider === undefined ? { input, output } : { input, output, provider };
+  // Cache pricing
+  const cacheReadInput = readSimplePrice(entry, 'cache_read_input_token_cost');
+  const cacheCreationInput = readSimplePrice(entry, 'cache_creation_input_token_cost');
+  const cacheCreationInputAbove1hr = readSimplePrice(entry, 'cache_creation_input_token_cost_above_1hr');
+
+  // Service tier pricing
+  const inputBatch = readSimplePrice(entry, 'input_cost_per_token_batches');
+  const outputBatch = readSimplePrice(entry, 'output_cost_per_token_batches');
+  const inputFlex = readSimplePrice(entry, 'input_cost_per_token_flex');
+  const outputFlex = readSimplePrice(entry, 'output_cost_per_token_flex');
+  const inputPriority = readSimplePrice(entry, 'input_cost_per_token_priority');
+  const outputPriority = readSimplePrice(entry, 'output_cost_per_token_priority');
+
+  // Reasoning pricing
+  const outputReasoning = readSimplePrice(entry, 'output_cost_per_reasoning_token');
+
+  // Context limits
+  const maxInputTokens = asFiniteNumber(entry.max_input_tokens);
+  const maxOutputTokens = asFiniteNumber(entry.max_output_tokens);
+
+  const pricing: ModelPricing = {
+    input,
+    output,
+    ...(provider !== undefined ? { provider } : {}),
+    ...(cacheReadInput !== undefined ? { cacheReadInput } : {}),
+    ...(cacheCreationInput !== undefined ? { cacheCreationInput } : {}),
+    ...(cacheCreationInputAbove1hr !== undefined ? { cacheCreationInputAbove1hr } : {}),
+    ...(inputBatch !== undefined ? { inputBatch } : {}),
+    ...(outputBatch !== undefined ? { outputBatch } : {}),
+    ...(inputFlex !== undefined ? { inputFlex } : {}),
+    ...(outputFlex !== undefined ? { outputFlex } : {}),
+    ...(inputPriority !== undefined ? { inputPriority } : {}),
+    ...(outputPriority !== undefined ? { outputPriority } : {}),
+    ...(outputReasoning !== undefined ? { outputReasoning } : {}),
+    ...(maxInputTokens !== undefined ? { maxInputTokens } : {}),
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+  };
+
+  return pricing;
 };
 
 export interface NormalizeOptions {

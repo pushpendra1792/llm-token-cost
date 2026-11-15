@@ -41,7 +41,11 @@
     "llm-token-cost": "dist/cli.js"
   },
   "files": [
-    "dist",
+    "dist/index.js",
+    "dist/index.cjs",
+    "dist/index.d.ts",
+    "dist/index.d.cts",
+    "dist/cli.js",
     "README.md",
     "LICENSE"
   ],

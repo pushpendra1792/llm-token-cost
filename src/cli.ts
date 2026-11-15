@@ -1,7 +1,7 @@
 import { parseArgs, USAGE } from './cli-args';
 import { formatJson, formatTable, toJsonPayload, toSerializedError } from './cli-format';
 import type { ModelEstimate } from './cli-format';
-import { estimateCost } from './estimate';
+import { estimateCost } from './index.js';
 import pkg from '../package.json';
 
 const EXIT_OK = 0;
