@@ -39,6 +39,9 @@ interface RawModelEntry {
   // Context limits
   readonly max_input_tokens?: unknown;
   readonly max_output_tokens?: unknown;
+
+  // Long-context tiered pricing (from LiteLLM tiered_pricing arrays)
+  readonly tiered_pricing?: unknown[];
 }
 
 /** Non-model keys that LiveLLM's document carries at the top level. */
@@ -51,6 +54,88 @@ const asRecord = (value: unknown): Record<string, unknown> | undefined =>
 
 const asFiniteNumber = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+
+/**
+ * Parses LiteLLM's tiered_pricing array into the internal tiers format.
+ *
+ * LiteLLM's tiered_pricing contains entries like:
+ *   { input_cost_per_token: 5e-8, output_cost_per_token: 4e-7, range: [0, 256000] }
+ * Each entry defines a tier that applies when inputTokens > range[0].
+ * Entries are sorted ascending by range[0] in the source; we keep that order.
+ * - If range[0] === 0, the tier applies when inputTokens > 0 (i.e. always, after any
+ *   lower-threshold tier). This is the "default" tier for the long-context surcharge.
+ * - If range[0] > 0, the tier applies when inputTokens > range[0].
+ * - Entries with range[0] < 0 or non-numeric are ignored.
+ * - Duplicate thresholds are collapsed: only the last entry with a given threshold is kept.
+ * - Missing price fields inside a tier fall back to the model's base price;
+ *   this is handled by the caller (estimateCostFromTokens) and a warning is added
+ *   only when the relevant token count is > 0.
+ */
+function parseTieredPricing(raw: unknown): ModelPricing['tiers'] {
+  if (!Array.isArray(raw)) return undefined;
+
+  const entries = raw.filter(
+    (item): item is Record<string, unknown> =>
+      typeof item === 'object' && item !== null && !Array.isArray(item),
+  );
+
+  // Build a map from threshold -> tier pricing, last-wins for duplicates
+  const thresholdMap = new Map<number, {
+    input: number | undefined;
+    output: number | undefined;
+    cacheReadInput: number | undefined;
+    cacheCreationInput: number | undefined;
+    cacheCreationInputAbove1hr: number | undefined;
+    outputReasoning: number | undefined;
+  }>();
+
+  for (const entry of entries) {
+    const range = entry['range'];
+    if (!Array.isArray(range) || range.length < 2) continue;
+    const above = asFiniteNumber(range[0]);
+    if (above === undefined || above < 0) continue; // only non-negative thresholds
+
+    // Extract prices (per-token, no unit conversion needed here – already normalized
+    // by the per-token readers above, but we re-read simple prices for safety):
+    const input = asFiniteNumber(entry['input_cost_per_token']);
+    const output = asFiniteNumber(entry['output_cost_per_token']);
+    const cacheRead = asFiniteNumber(entry['cache_read_input_token_cost']);
+    const cacheCreation = asFiniteNumber(entry['cache_creation_input_token_cost']);
+    const cacheCreationAbove1hr = asFiniteNumber(entry['cache_creation_input_token_cost_above_1hr']);
+    const outputReasoning = asFiniteNumber(entry['output_cost_per_reasoning_token']);
+
+    // Only add if at least one price is present; otherwise this entry is useless.
+    if (input === undefined && output === undefined && cacheRead === undefined &&
+        cacheCreation === undefined && cacheCreationAbove1hr === undefined && outputReasoning === undefined) {
+      continue;
+    }
+
+    // If this threshold already exists, overwrite (last-wins)
+    thresholdMap.set(above, {
+      input,
+      output,
+      cacheReadInput: cacheRead,
+      cacheCreationInput: cacheCreation,
+      cacheCreationInputAbove1hr: cacheCreationAbove1hr,
+      outputReasoning,
+    });
+  }
+
+  // Sort thresholds ascending and build the tiers array
+  const sortedThresholds = Array.from(thresholdMap.keys()).sort((a, b) => a - b);
+  return sortedThresholds.map((above) => {
+    const tier = thresholdMap.get(above)!;
+    return {
+      aboveInputTokens: above,
+      input: tier.input ?? undefined,
+      output: tier.output ?? undefined,
+      cacheReadInput: tier.cacheReadInput ?? undefined,
+      cacheCreationInput: tier.cacheCreationInput ?? undefined,
+      cacheCreationInputAbove1hr: tier.cacheCreationInputAbove1hr ?? undefined,
+      outputReasoning: tier.outputReasoning ?? undefined,
+    };
+  });
+}
 
 /**
  * Reads a price from whichever unit the upstream field is expressed in,
@@ -117,6 +202,9 @@ export const normalizeModelEntry = (raw: unknown): ModelPricing | undefined => {
   // Reasoning pricing
   const outputReasoning = readSimplePrice(entry, 'output_cost_per_reasoning_token');
 
+  // --- Long-context tiered pricing (from LiteLLM) ---
+  const tiers = parseTieredPricing(entry.tiered_pricing);
+
   // Context limits
   const maxInputTokens = asFiniteNumber(entry.max_input_tokens);
   const maxOutputTokens = asFiniteNumber(entry.max_output_tokens);
@@ -137,6 +225,7 @@ export const normalizeModelEntry = (raw: unknown): ModelPricing | undefined => {
     ...(outputReasoning !== undefined ? { outputReasoning } : {}),
     ...(maxInputTokens !== undefined ? { maxInputTokens } : {}),
     ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+    ...(tiers !== undefined ? { tiers } : {}),
   };
 
   return pricing;

@@ -40,6 +40,30 @@ export interface ModelPricing {
   /** Price per reasoning/thinking output token. */
   readonly outputReasoning?: number;
 
+  // --- Long-context tiered pricing ---
+  /** Ordered tiers for long-context pricing. A tier applies when inputTokens > aboveInputTokens.
+   * Pick the highest matching tier (last one in the sorted array whose threshold is below inputTokens).
+   * Each tier may override input, output, cacheReadInput, cacheCreationInput,
+   * cacheCreationInputAbove1hr, and outputReasoning prices; missing fields fall back to the
+   * model's base price. Tiers are sorted ascending by aboveInputTokens.
+   */
+  readonly tiers?: ReadonlyArray<{
+    /** Input tokens must be strictly greater than this for this tier to apply. */
+    readonly aboveInputTokens: number;
+    /** Input price when this tier applies. Falls back to the model's base price if undefined. */
+    readonly input: number | undefined;
+    /** Output price when this tier applies. Falls back to the model's base price if undefined. */
+    readonly output: number | undefined;
+    /** Price per cached input token (cache read) when this tier applies. Falls back to the model's base price if undefined. */
+    readonly cacheReadInput: number | undefined;
+    /** Price per cache write token (cache creation, TTL ≤ 5 minutes) when this tier applies. Falls back to the model's base price if undefined. */
+    readonly cacheCreationInput: number | undefined;
+    /** Price per cache write token (cache creation, TTL > 1 hour) when this tier applies. Falls back to the model's base price if undefined. */
+    readonly cacheCreationInputAbove1hr: number | undefined;
+    /** Price per reasoning/thinking output token when this tier applies. Falls back to the model's base price if undefined. */
+    readonly outputReasoning: number | undefined;
+  }>;
+
   // --- Context limits (informational) ---
   /** Maximum input tokens (context window). */
   readonly maxInputTokens?: number;
