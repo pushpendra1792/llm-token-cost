@@ -5,8 +5,8 @@ name: Update pricing snapshot
 # workflow exits without opening a pull request.
 on:
   schedule:
-    - name: Weekly pricing refresh
-      cron: '17 6 * * 1'
+    # Weekly pricing refresh
+    - cron: '17 6 * * 1'
   workflow_dispatch:
 
 # Never cancel a refresh part-way: a cancelled run can leave a half-written

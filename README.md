@@ -632,7 +632,7 @@ The MAPE and p95 figures in [Accuracy](#accuracy) and in [docs/BENCHMARK.md](./d
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
-| [`ci.yml`](./.github/workflows/ci.yml) | Every pull request, every push to `main` | `typecheck`, `test` and `build` on the Node versions in its matrix (20 and 22), then asserts the publish tarball contains no sources or tests |
+| [`ci.yml`](./.github/workflows/ci.yml) | Every pull request, every push to `main` | Typechecks, tests and builds on Node 22 and 24, asserts the publish tarball contains no sources or tests, and installs the packed tarball on Node 20 to smoke-test the ESM, CJS and CLI entry points against the bundled snapshot |
 | [`update-pricing.yml`](./.github/workflows/update-pricing.yml) | Weekly (Mondays 06:17 UTC) or manual | Regenerates the pricing snapshot and opens a pull request, but only if a price actually changed |
 | [`publish.yml`](./.github/workflows/publish.yml) | Push a `v*` tag | Typechecks, tests and builds, then publishes to npm with provenance and creates a GitHub release |
 
