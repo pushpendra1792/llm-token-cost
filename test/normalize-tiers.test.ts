@@ -118,3 +118,33 @@ describe('normalizeModelEntry: warnings', () => {
     expect(error).not.toHaveBeenCalled();
   });
 });
+
+describe('normalizeModelEntry: 1-hour cache write tiers', () => {
+  it('maps cache_creation_input_token_cost_above_1hr to the tier field', () => {
+    const pricing = normalizeModelEntry({
+      input_cost_per_token: 3e-6,
+      output_cost_per_token: 1.5e-5,
+      cache_creation_input_token_cost_above_200k_tokens: 3.75e-6,
+      cache_creation_input_token_cost_above_1hr_above_200k_tokens: 1.2e-5,
+    });
+
+    expect(pricing?.tiers).toHaveLength(1);
+    const tier = pricing?.tiers?.[0];
+    expect(tier?.aboveInputTokens).toBe(200000);
+    expect(tier?.cacheCreationInput).toBe(3.75e-6);
+    expect(tier?.cacheCreationInputAbove1hr).toBe(1.2e-5);
+  });
+
+  it('ignores the priority variant of the 1-hour cache write field', () => {
+    const pricing = normalizeModelEntry({
+      input_cost_per_token: 3e-6,
+      output_cost_per_token: 1.5e-5,
+      input_cost_per_token_above_200k_tokens: 6e-6,
+      output_cost_per_token_above_200k_tokens: 2.25e-5,
+      cache_creation_input_token_cost_above_1hr_above_200k_tokens_priority: 1.2e-5,
+    });
+
+    expect(pricing?.tiers).toHaveLength(1);
+    expect(pricing?.tiers?.[0]?.cacheCreationInputAbove1hr).toBeUndefined();
+  });
+});

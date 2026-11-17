@@ -160,7 +160,7 @@ function parseTieredPricing(
 
 /** The five bases that may carry a flat <base>_above_<N>k_tokens field. */
 const ABOVE_THRESHOLD_FIELD =
-  /^(input_cost_per_token|output_cost_per_token|cache_read_input_token_cost|cache_creation_input_token_cost|output_cost_per_reasoning_token)_above_(\d+)k_tokens$/;
+  /^(input_cost_per_token|output_cost_per_token|cache_read_input_token_cost|cache_creation_input_token_cost_above_1hr|cache_creation_input_token_cost|output_cost_per_reasoning_token)_above_(\d+)k_tokens$/;
 
 /**
  * Parses flat <base>_above_<N>k_tokens fields into tiers.
@@ -221,6 +221,9 @@ function parseFlatAboveThresholdFields(
         break;
       case 'cache_creation_input_token_cost':
         fields.cacheCreationInput = value;
+        break;
+      case 'cache_creation_input_token_cost_above_1hr':
+        fields.cacheCreationInputAbove1hr = value;
         break;
       case 'output_cost_per_reasoning_token':
         fields.outputReasoning = value;
