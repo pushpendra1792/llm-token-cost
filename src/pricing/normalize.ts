@@ -55,6 +55,9 @@ const asRecord = (value: unknown): Record<string, unknown> | undefined =>
 const asFiniteNumber = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 
+/** Receives non-fatal normalization notes. Defaults to silence at call sites. */
+type Warn = (message: string) => void;
+
 /**
  * Parses LiteLLM's tiered_pricing array into the internal tiers format.
  *
@@ -68,10 +71,15 @@ const asFiniteNumber = (value: unknown): number | undefined =>
  * - Entries with range[0] < 0 or non-numeric are ignored.
  * - Duplicate thresholds are collapsed: only the last entry with a given threshold is kept.
  * - Missing price fields inside a tier fall back to the model's base price;
- *   this is handled by the caller (estimateCostFromTokens) and a warning is added
- *   only when the relevant token count is > 0.
+ *   this is handled by the caller (estimateCostFromTokens) and a note is sent to
+ *   `onWarn` only when the relevant token count is > 0.
  */
-function parseTieredPricing(raw: unknown, baseInput: number, baseOutput: number): ModelPricing['tiers'] {
+function parseTieredPricing(
+  raw: unknown,
+  baseInput: number,
+  baseOutput: number,
+  onWarn: Warn,
+): ModelPricing['tiers'] {
   if (!Array.isArray(raw)) return undefined;
 
   const entries = raw.filter(
@@ -112,13 +120,13 @@ function parseTieredPricing(raw: unknown, baseInput: number, baseOutput: number)
 
     // If range[0] === 0, this entry represents the model's base price.
     // Do NOT emit it as a tier. If its prices differ from the model's base price,
-    // log a warning (the caller can surface it) but still skip it.
+    // surface a note through onWarn but still skip it.
     if (above === 0) {
       if (input !== undefined && input !== baseInput) {
-        console.warn(`Tiered pricing: model input price at threshold 0 differs from base (${input} vs ${baseInput})`);
+        onWarn(`Tiered pricing: model input price at threshold 0 differs from base (${input} vs ${baseInput})`);
       }
       if (output !== undefined && output !== baseOutput) {
-        console.warn(`Tiered pricing: model output price at threshold 0 differs from base (${output} vs ${baseOutput})`);
+        onWarn(`Tiered pricing: model output price at threshold 0 differs from base (${output} vs ${baseOutput})`);
       }
       continue; // skip this entry entirely
     }
@@ -171,6 +179,7 @@ function parseFlatAboveThresholdFields(
   entry: RawModelEntry,
   baseInput: number,
   baseOutput: number,
+  onWarn: Warn,
 ): ModelPricing['tiers'] {
   type TierFields = {
     input: number | undefined;
@@ -225,12 +234,12 @@ function parseFlatAboveThresholdFields(
   return thresholds.map((aboveInputTokens) => {
     const fields = byThreshold.get(aboveInputTokens)!;
     if (fields.input === undefined) {
-      console.warn(
+      onWarn(
         `Tiered pricing: no input price above ${aboveInputTokens} tokens; falling back to base input (${baseInput})`,
       );
     }
     if (fields.output === undefined) {
-      console.warn(
+      onWarn(
         `Tiered pricing: no output price above ${aboveInputTokens} tokens; falling back to base output (${baseOutput})`,
       );
     }
@@ -300,7 +309,10 @@ const readSimplePrice = (entry: RawModelEntry, field: keyof RawModelEntry): numb
  * defaulting output to input) would silently invent a number, and this library
  * exists to produce numbers people budget against.
  */
-export const normalizeModelEntry = (raw: unknown): ModelPricing | undefined => {
+export const normalizeModelEntry = (
+  raw: unknown,
+  onWarn: Warn = () => {},
+): ModelPricing | undefined => {
   const record = asRecord(raw);
   if (record === undefined) return undefined;
 
@@ -334,8 +346,8 @@ export const normalizeModelEntry = (raw: unknown): ModelPricing | undefined => {
   const baseOutput = output;
 
   // --- Long-context tiered pricing (from LiteLLM) ---
-  const arrayTiers = parseTieredPricing(entry.tiered_pricing, baseInput, baseOutput);
-  const flatTiers = parseFlatAboveThresholdFields(entry, baseInput, baseOutput);
+  const arrayTiers = parseTieredPricing(entry.tiered_pricing, baseInput, baseOutput, onWarn);
+  const flatTiers = parseFlatAboveThresholdFields(entry, baseInput, baseOutput, onWarn);
   const mergedTiers = mergeTiers(arrayTiers, flatTiers);
   const tiers = mergedTiers.length > 0 ? mergedTiers : undefined;
 
@@ -368,6 +380,8 @@ export const normalizeModelEntry = (raw: unknown): ModelPricing | undefined => {
 export interface NormalizeOptions {
   readonly source?: string;
   readonly updatedAt?: string;
+  /** Receives non-fatal notes; omitted means normalization stays silent. */
+  readonly onWarn?: Warn;
 }
 
 /**
@@ -389,7 +403,7 @@ export const normalizeLiteLLMPricing = (
   const models: Record<string, ModelPricing> = {};
   for (const [key, value] of Object.entries(record)) {
     if (RESERVED_KEYS.has(key)) continue;
-    const pricing = normalizeModelEntry(value);
+    const pricing = normalizeModelEntry(value, options.onWarn);
     if (pricing !== undefined) models[key] = pricing;
   }
 

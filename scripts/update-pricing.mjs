@@ -185,8 +185,9 @@ const main = async () => {
     // stays small; audio/image/embedding-only entries are left out.
     if (typeof value?.mode !== 'string' || !CHAT_MODES.has(value.mode)) continue;
 
-    // The one and only normalizer, shared with the library.
-    const pricing = normalizeModelEntry(value);
+    // The one and only normalizer, shared with the library. This script is the
+    // one caller that opts into normalization notes so they show up in CI logs.
+    const pricing = normalizeModelEntry(value, (message) => console.warn(message));
     if (pricing === undefined) {
       skipped += 1;
       continue;

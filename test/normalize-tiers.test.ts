@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { normalizeModelEntry } from '../src/pricing/normalize';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 /**
  * Unit tests for long-context tier extraction in normalizeModelEntry.
@@ -81,5 +85,36 @@ describe('normalizeModelEntry: no tiers', () => {
 
     expect(pricing).toBeDefined();
     expect(pricing && 'tiers' in pricing ? pricing.tiers : undefined).toBeUndefined();
+  });
+});
+
+describe('normalizeModelEntry: warnings', () => {
+  it('never writes to the console and reports fallbacks through onWarn', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const fixture = {
+      input_cost_per_token: 2e-6,
+      output_cost_per_token: 8e-6,
+      input_cost_per_token_above_200k_tokens: 4e-6,
+    };
+
+    // Without onWarn, normalization is completely silent.
+    normalizeModelEntry(fixture);
+    expect(warn).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+
+    // With onWarn, the fallback is reported through the callback instead.
+    const messages: string[] = [];
+    const pricing = normalizeModelEntry(fixture, (message) => messages.push(message));
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain('no output price above 200000 tokens');
+    expect(pricing?.tiers?.[0]?.output).toBe(8e-6);
+    expect(warn).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
   });
 });
