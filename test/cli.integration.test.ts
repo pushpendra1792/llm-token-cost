@@ -187,6 +187,8 @@ describe('cli: json output', () => {
       'estimated',
       'inputTokens',
       'outputTokens',
+      'pricingSource',
+      'pricingUpdatedAt',
     ]);
     expect(parsed['currency']).toBe('USD');
     // false proves the live fetch actually reached the fixture rather than
@@ -236,7 +238,17 @@ describe('cli: stdin handling', () => {
   cliIt('prefers stdin over a positional argument', async () => {
     const piped = await runCli(['-m', 'gpt-4o', '--json'], 'the same text either way');
     const positional = await runCli(['the same text either way', '-m', 'gpt-4o', '--json']);
-    expect(piped.stdout).toBe(positional.stdout);
+
+    // Each invocation is its own process and fetches its own live pricing, so
+    // `pricingUpdatedAt` is a real timestamp that differs between the two runs.
+    // Everything else must still be identical.
+    const withoutFetchedAt = (stdout: string): Record<string, unknown> => {
+      const parsed = JSON.parse(stdout) as Record<string, unknown>;
+      delete parsed['pricingUpdatedAt'];
+      return parsed;
+    };
+
+    expect(withoutFetchedAt(piped.stdout)).toEqual(withoutFetchedAt(positional.stdout));
   });
 
   cliIt('warns when both stdin and a positional argument are given', async () => {

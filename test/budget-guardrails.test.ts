@@ -525,6 +525,8 @@ describe('integration with estimateCost', () => {
       cost: 0.0000025,
       currency: 'USD',
       estimated: false,
+      pricingSource: 'live',
+      pricingUpdatedAt: expect.any(String),
     });
   });
 });

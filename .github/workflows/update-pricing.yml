@@ -50,6 +50,9 @@ jobs:
             const snap = JSON.parse(readFileSync('src/pricing/snapshot.json', 'utf8'));
             if (snap.schemaVersion !== 1) throw new Error('unexpected schemaVersion: ' + snap.schemaVersion);
             if (typeof snap.updatedAt !== 'string') throw new Error('updatedAt must be a string');
+            if (typeof snap.generatedAt !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}$/.test(snap.generatedAt)) {
+              throw new Error('generatedAt must be an ISO date (YYYY-MM-DD)');
+            }
             if (typeof snap.models !== 'object' || snap.models === null) throw new Error('models must be an object');
             const snapModels = Object.entries(snap.models);
             if (snapModels.length === 0) throw new Error('models is empty');
@@ -73,7 +76,7 @@ jobs:
               }
             }
 
-            console.log(snap.models.length + ' models, updatedAt ' + snap.updatedAt);
+            console.log(Object.keys(snap.models).length + ' models, updatedAt ' + snap.updatedAt + ', generatedAt ' + snap.generatedAt);
           "
 
       - name: Detect pricing changes

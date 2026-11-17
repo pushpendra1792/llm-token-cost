@@ -5,6 +5,7 @@ export type {
   EstimateCostFromTokensResult,
   EstimateCostInput,
   EstimateCostResult,
+  EstimatePricingSource,
 } from './estimate';
 
 export { estimateCostFromUsage } from './usage';
@@ -47,6 +48,7 @@ export { getTiktokenEncoder, isTiktokenModel, resolveTiktokenEncoding } from './
 
 export {
   DEFAULT_PRICING_TTL_MS,
+  DEFAULT_STALE_AFTER_DAYS,
   getBundledSnapshot,
   getPricing,
   LITELLM_PRICING_URL,

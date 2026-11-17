@@ -5,6 +5,8 @@ import type { PricingTable, ResolvedPricing } from './types';
 
 export const DEFAULT_PRICING_TTL_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_PRICING_TIMEOUT_MS = 10_000;
+/** Bundled prices older than this many days produce a staleness warning. */
+export const DEFAULT_STALE_AFTER_DAYS = 90;
 
 /**
  * Overrides the pricing feed URL. Useful behind a corporate proxy or against an
@@ -51,18 +53,29 @@ export interface GetPricingOptions {
   readonly ttlMs?: number;
   /** Per-request timeout. Defaults to 10 seconds. */
   readonly timeoutMs?: number;
-  /** Clock injection point for tests. */
-  readonly now?: () => number;
+  /**
+   * Clock injection point for tests. Accepts either a function or a fixed
+   * `Date`; the same clock is used for cache age and snapshot staleness.
+   */
+  readonly now?: (() => number) | Date;
   /** Skip the cache freshness check and refetch. */
   readonly forceRefresh?: boolean;
   /** Pricing feed URL. Defaults to the `LLM_TOKEN_COST_PRICING_URL` env var, then LiteLLM. */
   readonly url?: string;
+  /**
+   * Age in days at which bundled snapshot pricing starts producing a warning.
+   * Defaults to {@link DEFAULT_STALE_AFTER_DAYS}.
+   */
+  readonly staleAfterDays?: number;
 }
+
+const resolveNowMs = (now: GetPricingOptions['now']): number =>
+  typeof now === 'function' ? now() : now instanceof Date ? now.getTime() : Date.now();
 
 const fetchPricingTable = async (
   url: string,
   timeoutMs: number,
-  now: () => number,
+  nowMs: number,
 ): Promise<PricingTable> => {
   const impl = fetchOverride ?? globalThis.fetch;
   if (typeof impl !== 'function') {
@@ -86,7 +99,7 @@ const fetchPricingTable = async (
       );
     }
 
-    return normalizeLiteLLMPricing(await response.json(), { updatedAt: new Date(now()).toISOString() });
+    return normalizeLiteLLMPricing(await response.json(), { updatedAt: new Date(nowMs).toISOString() });
   } catch (error) {
     if (error instanceof PricingFetchError) throw error;
     throw new PricingFetchError(
@@ -116,10 +129,10 @@ const fetchPricingTable = async (
  * pricing rather than an exception.
  */
 export const getPricing = async (options: GetPricingOptions = {}): Promise<ResolvedPricing> => {
-  const now = options.now ?? Date.now;
+  const nowMs = resolveNowMs(options.now);
   const ttlMs = options.ttlMs ?? DEFAULT_PRICING_TTL_MS;
 
-  if (options.forceRefresh !== true && cache !== undefined && now() - cache.storedAt < ttlMs) {
+  if (options.forceRefresh !== true && cache !== undefined && nowMs - cache.storedAt < ttlMs) {
     return { table: cache.table, source: 'cache', estimated: false };
   }
 
@@ -127,9 +140,9 @@ export const getPricing = async (options: GetPricingOptions = {}): Promise<Resol
     const table = await fetchPricingTable(
       resolvePricingUrl(options.url),
       options.timeoutMs ?? DEFAULT_PRICING_TIMEOUT_MS,
-      now,
+      nowMs,
     );
-    cache = { table, storedAt: now() };
+    cache = { table, storedAt: nowMs };
     return { table, source: 'remote', estimated: false };
   } catch (error) {
     const cause = error instanceof Error ? error : new Error(String(error));

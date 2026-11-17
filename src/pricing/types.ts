@@ -77,8 +77,13 @@ export type PricingTier = NonNullable<ModelPricing['tiers']>[number];
 export interface PricingTable {
   readonly schemaVersion: 1;
   readonly models: Readonly<Record<string, ModelPricing>>;
-  /** ISO-8601 timestamp of when this table was produced. */
+  /** ISO-8601 timestamp of when this table's pricing last changed. */
   readonly updatedAt: string;
+  /**
+   * ISO date (`YYYY-MM-DD`) of the last model-content change in the bundled
+   * snapshot. Live tables omit it; their fetch time is in `updatedAt`.
+   */
+  readonly generatedAt?: string;
   /** Where the data came from. */
   readonly source: string;
 }

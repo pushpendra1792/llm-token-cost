@@ -1,17 +1,27 @@
 import { InvalidInputError, UnknownModelError } from './errors';
 import { findModelPricing } from './pricing/lookup';
-import { getPricing, type GetPricingOptions } from './pricing/fetch';
+import {
+  DEFAULT_STALE_AFTER_DAYS,
+  getPricing,
+  type GetPricingOptions,
+} from './pricing/fetch';
 import {
   PRICING_CURRENCY,
   type CacheTtl,
   type ModelPricing,
+  type PricingSource,
   type PricingTier,
+  type ResolvedPricing,
   type ServiceTier,
 } from './pricing/types';
 import { resolveTokenizer } from './tokenizers';
 
 const SERVICE_TIERS: ReadonlyArray<ServiceTier> = ['standard', 'batch', 'flex', 'priority'];
 const CACHE_TTLS: ReadonlyArray<CacheTtl> = ['5m', '1h'];
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** How the price for an estimate was resolved, as reported on results. */
+export type EstimatePricingSource = 'live' | 'cache' | 'snapshot' | 'custom';
 
 /**
  * Validates a model id before any pricing lookup happens.
@@ -26,6 +36,51 @@ const assertModel = (model: string): void => {
   }
 };
 
+const toResultPricingSource = (source: PricingSource): EstimatePricingSource => {
+  switch (source) {
+    case 'remote':
+      return 'live';
+    case 'cache':
+    case 'stale-cache':
+      return 'cache';
+    case 'snapshot':
+      return 'snapshot';
+  }
+};
+
+const resolveNowMs = (now: GetPricingOptions['now']): number =>
+  typeof now === 'function' ? now() : now instanceof Date ? now.getTime() : Date.now();
+
+const snapshotStalenessWarning = (
+  pricing: ResolvedPricing,
+  options: GetPricingOptions,
+): string | undefined => {
+  if (pricing.source !== 'snapshot') return undefined;
+  const generatedAt = pricing.table.generatedAt;
+  if (generatedAt === undefined) return undefined;
+
+  const generatedMs = Date.parse(generatedAt);
+  if (!Number.isFinite(generatedMs)) return undefined;
+
+  const ageMs = resolveNowMs(options.now) - generatedMs;
+  const staleAfterDays = options.staleAfterDays ?? DEFAULT_STALE_AFTER_DAYS;
+  if (ageMs <= staleAfterDays * DAY_MS) return undefined;
+
+  const days = Math.floor(ageMs / DAY_MS);
+  return (
+    `Bundled pricing is ${days} days old (generated ${generatedAt}); ` +
+    'updating the package or enabling live pricing may give newer prices.'
+  );
+};
+
+interface ResolvedModelPricing {
+  readonly modelPricing: ModelPricing;
+  readonly estimated: boolean;
+  readonly pricingSource: EstimatePricingSource;
+  readonly pricingUpdatedAt: string | undefined;
+  readonly staleWarning: string | undefined;
+}
+
 /**
  * Resolves a validated model to its pricing entry through the same source
  * ladder the public estimators use: live feed, then fresh cache, then bundled
@@ -39,14 +94,21 @@ const assertModel = (model: string): void => {
 const resolveModelPricing = async (
   model: string,
   options: GetPricingOptions,
-): Promise<{ readonly modelPricing: ModelPricing; readonly estimated: boolean }> => {
+): Promise<ResolvedModelPricing> => {
   const pricing = await getPricing(options);
   const modelPricing = findModelPricing(pricing.table, model);
   if (modelPricing === undefined) {
     throw new UnknownModelError(model, pricing.error === undefined ? undefined : { cause: pricing.error });
   }
 
-  return { modelPricing, estimated: pricing.estimated };
+  return {
+    modelPricing,
+    estimated: pricing.estimated,
+    pricingSource: toResultPricingSource(pricing.source),
+    pricingUpdatedAt:
+      pricing.source === 'snapshot' ? pricing.table.generatedAt : pricing.table.updatedAt,
+    staleWarning: snapshotStalenessWarning(pricing, options),
+  };
 };
 
 /** Rejects counts that cannot be a real token total, with a message per cause. */
@@ -84,6 +146,15 @@ export interface EstimateCostResult {
    * False only when the token count is exact (tiktoken) *and* pricing is live.
    */
   readonly estimated: boolean;
+  /** How the per-token prices were resolved. */
+  readonly pricingSource?: EstimatePricingSource;
+  /**
+   * When the pricing data was produced: the fetch time for live/cache prices,
+   * or the snapshot's `generatedAt` for bundled prices.
+   */
+  readonly pricingUpdatedAt?: string;
+  /** Notes about pricing quality, such as stale bundled data. */
+  readonly warnings?: string[];
 }
 
 /**
@@ -104,7 +175,13 @@ export const estimateCost = async (
     throw new InvalidInputError('`inputText` must be a string');
   }
 
-  const { modelPricing, estimated: pricingEstimated } = await resolveModelPricing(model, options);
+  const {
+    modelPricing,
+    estimated: pricingEstimated,
+    pricingSource,
+    pricingUpdatedAt,
+    staleWarning,
+  } = await resolveModelPricing(model, options);
 
   const tokenizer = resolveTokenizer(model);
   const inputTokens = tokenizer.countTokens(inputText);
@@ -122,6 +199,9 @@ export const estimateCost = async (
     // A new tokenizer kind added later then reports `estimated: true` by
     // default instead of silently claiming an exact count it cannot deliver.
     estimated: tokenizer.kind !== 'tiktoken' || pricingEstimated,
+    pricingSource,
+    ...(pricingUpdatedAt !== undefined ? { pricingUpdatedAt } : {}),
+    ...(staleWarning !== undefined ? { warnings: [staleWarning] } : {}),
   };
 };
 
@@ -187,6 +267,13 @@ export interface EstimateCostFromTokensResult {
    * is not.
    */
   readonly estimated: boolean;
+  /** How the per-token prices were resolved. */
+  readonly pricingSource?: EstimatePricingSource;
+  /**
+   * When the pricing data was produced: the fetch time for live/cache prices,
+   * or the snapshot's `generatedAt` for bundled prices.
+   */
+  readonly pricingUpdatedAt?: string;
   /**
    * Per-category costs. Present only when at least one breakdown input
    * (`cacheReadInputTokens`, `cacheCreationInputTokens`, or
@@ -370,12 +457,19 @@ export const estimateCostFromTokens = async (
     throw new InvalidInputError('`reasoningOutputTokens` must not exceed `outputTokens`');
   }
 
-  const { modelPricing, estimated } = await resolveModelPricing(model, options);
+  const {
+    modelPricing,
+    estimated,
+    pricingSource,
+    pricingUpdatedAt,
+    staleWarning,
+  } = await resolveModelPricing(model, options);
 
   const servicePricing = resolveTierPricing(model, modelPricing, serviceTier);
   const longContext = resolveLongContextTier(model, modelPricing, inputTokens, serviceTier);
   const appliedTier = longContext.tier;
   const warnings = [...servicePricing.warnings, ...longContext.warnings];
+  if (staleWarning !== undefined) warnings.push(staleWarning);
 
   const effectiveInput = appliedTier?.input ?? servicePricing.input;
   const effectiveOutput = appliedTier?.output ?? servicePricing.output;
@@ -508,6 +602,8 @@ export const estimateCostFromTokens = async (
     currency: PRICING_CURRENCY,
     // Pricing only: the counts are the caller's, and are used as given.
     estimated,
+    pricingSource,
+    ...(pricingUpdatedAt !== undefined ? { pricingUpdatedAt } : {}),
     ...(wantsBreakdown ? { breakdown } : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
     ...(appliedTier !== undefined ? { pricingTier: appliedTier } : {}),

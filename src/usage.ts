@@ -4,6 +4,7 @@ import {
   type EstimateCostFromTokensInput,
   type EstimateCostFromTokensResult,
 } from './estimate';
+import type { GetPricingOptions } from './pricing/fetch';
 import type { CacheTtl, ServiceTier } from './pricing/types';
 
 /** Usage-object dialect recognized by {@link estimateCostFromUsage}. */
@@ -31,6 +32,10 @@ export interface EstimateCostFromUsageInput {
   readonly provider?: string;
   /** Explicit service tier. Wins over `usage.service_tier`. */
   readonly serviceTier?: ServiceTier;
+  /** Override the bundled-pricing staleness threshold, in days. */
+  readonly staleAfterDays?: number;
+  /** Clock injection point for staleness and pricing cache tests. */
+  readonly now?: GetPricingOptions['now'];
 }
 
 export interface EstimateCostFromUsageResult extends EstimateCostFromTokensResult {
@@ -386,6 +391,7 @@ const genericUsage = (usage: UnknownRecord, serviceTier: ServiceTier): Normalize
  */
 export const estimateCostFromUsage = async (
   input: EstimateCostFromUsageInput,
+  options: GetPricingOptions = {},
 ): Promise<EstimateCostFromUsageResult> => {
   const usage = asRecord(unwrapUsage(input.usage));
   if (usage === undefined) {
@@ -428,6 +434,12 @@ export const estimateCostFromUsage = async (
       : {}),
   };
 
-  const result = await estimateCostFromTokens(estimateInput);
+  const pricingOptions: GetPricingOptions = {
+    ...options,
+    ...(input.staleAfterDays !== undefined ? { staleAfterDays: input.staleAfterDays } : {}),
+    ...(input.now !== undefined ? { now: input.now } : {}),
+  };
+
+  const result = await estimateCostFromTokens(estimateInput, pricingOptions);
   return { ...result, usageFormat: format };
 };

@@ -14,20 +14,23 @@
  * to only the models that actually changed.
  *
  * The output is byte-stable across runs. Model keys are sorted and prices go
- * through `JSON.stringify`, so `updatedAt` is the only field that could
- * otherwise drift. It is therefore written as "when the data last changed"
- * rather than "when this script last ran": the file is first rendered with the
- * previous `updatedAt`, and only if that does not reproduce the committed file
- * byte for byte is a fresh timestamp substituted. Re-running against unchanged
- * upstream data therefore leaves the working tree clean, which is what lets the
+ * through `JSON.stringify`, so the metadata timestamps are the only fields that
+ * could otherwise drift. `updatedAt` is written as "when the data last
+ * changed" rather than "when this script last ran", and `generatedAt` follows
+ * the model payload only. The file is first rendered with the previous
+ * metadata, and only if that does not reproduce the committed file byte for
+ * byte is a fresh timestamp substituted. Re-running against unchanged upstream
+ * data therefore leaves the working tree clean, which is what lets the
  * scheduled workflow exit without opening a no-op pull request.
  */
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { normalizeModelEntry } from '../dist/normalize.js';
-
-const LITELLM_PRICING_URL =
-  'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
+import {
+  LITELLM_PRICING_URL,
+  formatLimits,
+  planSnapshotUpdate,
+} from './pricing-snapshot.mjs';
 
 const OUTPUT_PATH = fileURLToPath(new URL('../src/pricing/snapshot.json', import.meta.url));
 const LIMITS_OUTPUT_PATH = fileURLToPath(new URL('../src/pricing/limits.json', import.meta.url));
@@ -41,31 +44,6 @@ const CHAT_MODES = new Set(['chat', 'completion', 'responses']);
 const readNumber = (entry, field) => {
   const value = entry[field];
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
-};
-
-const formatSnapshot = (models, updatedAt) => {
-  const sortedModels = Object.fromEntries(
-    Object.keys(models)
-      .sort()
-      .map((key) => [key, models[key]]),
-  );
-  return JSON.stringify({
-    schemaVersion: 1,
-    updatedAt,
-    source: LITELLM_PRICING_URL,
-    currency: 'USD',
-    unit: 'per_token',
-    models: sortedModels,
-  });
-};
-
-const formatLimits = (limits) => {
-  const sortedLimits = Object.fromEntries(
-    Object.keys(limits)
-      .sort()
-      .map((key) => [key, limits[key]]),
-  );
-  return JSON.stringify(sortedLimits);
 };
 
 /** The committed snapshot's raw text plus its metadata, or undefined if unusable. */
@@ -87,6 +65,7 @@ const readPrevious = async () => {
   return {
     text,
     updatedAt: parsed.updatedAt,
+    ...(typeof parsed.generatedAt === 'string' ? { generatedAt: parsed.generatedAt } : {}),
     models: typeof models === 'object' && models !== null ? models : {},
   };
 };
@@ -221,36 +200,32 @@ const main = async () => {
   const previousLimitsText = await readPreviousLimits();
   const limitsText = formatLimits(limits);
 
-  // Render with the previous timestamp first. Matching the committed files byte
-  // for byte proves the upstream data is unchanged, so nothing is written and
-  // the scheduled workflow has no diff to open a pull request from.
-  const snapshotWithPreviousTimestamp =
-    previous === undefined ? undefined : formatSnapshot(models, previous.updatedAt);
+  // Re-render with the previous metadata first. Matching the committed files
+  // byte for byte proves the upstream data is unchanged, so nothing is written
+  // and the scheduled workflow has no diff to open a pull request from.
+  const plan = planSnapshotUpdate({
+    ...(previous === undefined ? {} : { previous }),
+    models,
+    now: new Date(),
+  });
+  const limitsChanged = previousLimitsText !== limitsText;
 
-  if (
-    previous !== undefined &&
-    snapshotWithPreviousTimestamp === previous.text &&
-    previousLimitsText === limitsText
-  ) {
+  if (!plan.changed && !limitsChanged) {
     console.log(`Pricing snapshot already up to date (${count} models, ${tiered} tiered) - nothing written`);
     return;
   }
 
-  const updatedAt =
-    previous !== undefined && snapshotWithPreviousTimestamp === previous.text
-      ? previous.updatedAt
-      : new Date().toISOString();
-
   const { added, removed, repriced } = summarizeChanges(previous?.models ?? {}, models);
-  await writeFile(OUTPUT_PATH, formatSnapshot(models, updatedAt), 'utf8');
-  await writeFile(LIMITS_OUTPUT_PATH, limitsText, 'utf8');
+  if (plan.changed) await writeFile(OUTPUT_PATH, plan.text, 'utf8');
+  if (limitsChanged) await writeFile(LIMITS_OUTPUT_PATH, limitsText, 'utf8');
 
-  console.log(`Wrote ${OUTPUT_PATH}`);
-  console.log(`Wrote ${LIMITS_OUTPUT_PATH}`);
+  if (plan.changed) console.log(`Wrote ${OUTPUT_PATH}`);
+  if (limitsChanged) console.log(`Wrote ${LIMITS_OUTPUT_PATH}`);
   console.log(`  models: ${count}`);
   console.log(`  tiered: ${tiered}`);
   console.log(`  skipped (missing input or output price): ${skipped}`);
   console.log(`  changes: ${added} added, ${removed} removed, ${repriced} repriced`);
+  console.log(`  generatedAt: ${plan.generatedAt}`);
 };
 
 await main();
