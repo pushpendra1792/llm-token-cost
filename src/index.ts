@@ -7,6 +7,13 @@ export type {
   EstimateCostResult,
 } from './estimate';
 
+export { estimateCostFromUsage } from './usage';
+export type {
+  EstimateCostFromUsageInput,
+  EstimateCostFromUsageResult,
+  UsageFormat,
+} from './usage';
+
 export {
   BudgetExceededError,
   InvalidInputError,

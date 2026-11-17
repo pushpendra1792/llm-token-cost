@@ -153,6 +153,14 @@ export interface EstimateCostFromTokensInput {
   readonly cacheReadInputTokens?: number;
   /** Subset of `inputTokens` written to a prompt cache. */
   readonly cacheCreationInputTokens?: number;
+  /**
+   * Subset of `cacheCreationInputTokens` written with a 1-hour cache TTL. Those
+   * tokens use the 1-hour write price; the remainder uses the 5-minute price.
+   *
+   * When omitted, `cacheTtl` decides the price for all write tokens, preserving
+   * the original all-5m or all-1h behaviour.
+   */
+  readonly cacheCreation1hInputTokens?: number;
   /** Subset of `outputTokens` spent on reasoning/thinking. */
   readonly reasoningOutputTokens?: number;
   /** Billing tier for the whole request. Defaults to `standard`. */
@@ -340,6 +348,7 @@ export const estimateCostFromTokens = async (
   assertTokenCount(outputTokens, 'outputTokens');
   assertOptionalTokenCount(input.cacheReadInputTokens, 'cacheReadInputTokens');
   assertOptionalTokenCount(input.cacheCreationInputTokens, 'cacheCreationInputTokens');
+  assertOptionalTokenCount(input.cacheCreation1hInputTokens, 'cacheCreation1hInputTokens');
   assertOptionalTokenCount(input.reasoningOutputTokens, 'reasoningOutputTokens');
   assertServiceTier(serviceTier);
   assertCacheTtl(cacheTtl);
@@ -347,6 +356,14 @@ export const estimateCostFromTokens = async (
   if (cacheReadInputTokens + cacheCreationInputTokens > inputTokens) {
     throw new InvalidInputError(
       '`cacheReadInputTokens` + `cacheCreationInputTokens` must not exceed `inputTokens`',
+    );
+  }
+  if (
+    input.cacheCreation1hInputTokens !== undefined &&
+    input.cacheCreation1hInputTokens > cacheCreationInputTokens
+  ) {
+    throw new InvalidInputError(
+      '`cacheCreation1hInputTokens` must not exceed `cacheCreationInputTokens`',
     );
   }
   if (reasoningOutputTokens > outputTokens) {
@@ -393,13 +410,37 @@ export const estimateCostFromTokens = async (
   }
 
   // Cache writes: TTL selects the price; a missing 1h price falls back to 5m.
+  // A split charges only the 1h subset at the 1h rate.
   const fiveMinuteCacheCreationPrice =
     appliedTier?.cacheCreationInput ?? modelPricing.cacheCreationInput;
-  let cacheCreationPrice: number;
-  if (cacheTtl === '1h') {
-    const oneHourCacheCreationPrice =
-      appliedTier?.cacheCreationInputAbove1hr ?? modelPricing.cacheCreationInputAbove1hr;
+  const oneHourCacheCreationPrice =
+    appliedTier?.cacheCreationInputAbove1hr ?? modelPricing.cacheCreationInputAbove1hr;
 
+  let cacheCreationCost: number;
+  if (input.cacheCreation1hInputTokens !== undefined) {
+    const oneHourTokens = input.cacheCreation1hInputTokens;
+    const fiveMinuteTokens = cacheCreationInputTokens - oneHourTokens;
+
+    let oneHourPrice = oneHourCacheCreationPrice;
+    if (oneHourPrice === undefined) {
+      oneHourPrice = fiveMinuteCacheCreationPrice ?? effectiveInput;
+      if (oneHourTokens > 0) {
+        warnings.push(
+          fiveMinuteCacheCreationPrice !== undefined
+            ? `No 1-hour cache creation price for ${model}; using the 5-minute cache write price.`
+            : `No cache creation price for ${model}; using the normal input price.`,
+        );
+      }
+    }
+
+    const fiveMinutePrice = fiveMinuteCacheCreationPrice ?? effectiveInput;
+    if (fiveMinuteCacheCreationPrice === undefined && fiveMinuteTokens > 0) {
+      warnings.push(`No cache creation price for ${model}; using the normal input price.`);
+    }
+
+    cacheCreationCost = oneHourTokens * oneHourPrice + fiveMinuteTokens * fiveMinutePrice;
+  } else if (cacheTtl === '1h') {
+    let cacheCreationPrice: number;
     if (oneHourCacheCreationPrice !== undefined) {
       cacheCreationPrice = oneHourCacheCreationPrice;
     } else if (fiveMinuteCacheCreationPrice !== undefined) {
@@ -415,13 +456,14 @@ export const estimateCostFromTokens = async (
         warnings.push(`No cache creation price for ${model}; using the normal input price.`);
       }
     }
+    cacheCreationCost = cacheCreationInputTokens * cacheCreationPrice;
   } else if (fiveMinuteCacheCreationPrice !== undefined) {
-    cacheCreationPrice = fiveMinuteCacheCreationPrice;
+    cacheCreationCost = cacheCreationInputTokens * fiveMinuteCacheCreationPrice;
   } else {
-    cacheCreationPrice = effectiveInput;
     if (cacheCreationInputTokens > 0) {
       warnings.push(`No cache creation price for ${model}; using the normal input price.`);
     }
+    cacheCreationCost = cacheCreationInputTokens * effectiveInput;
   }
 
   // Reasoning: use the published reasoning price, else the normal output rate.
@@ -441,7 +483,7 @@ export const estimateCostFromTokens = async (
   const breakdown: EstimateCostBreakdown = {
     input: regularInputTokens * effectiveInput,
     cacheRead: cacheReadInputTokens * cacheReadPrice,
-    cacheCreation: cacheCreationInputTokens * cacheCreationPrice,
+    cacheCreation: cacheCreationCost,
     output: regularOutputTokens * effectiveOutput,
     reasoning: reasoningOutputTokens * reasoningPrice,
   };
@@ -456,6 +498,7 @@ export const estimateCostFromTokens = async (
   const wantsBreakdown =
     input.cacheReadInputTokens !== undefined ||
     input.cacheCreationInputTokens !== undefined ||
+    input.cacheCreation1hInputTokens !== undefined ||
     input.reasoningOutputTokens !== undefined;
 
   return {
