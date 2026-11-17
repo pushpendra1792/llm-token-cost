@@ -56,6 +56,7 @@ export type {
   ModelPricing,
   PricingSource,
   PricingTable,
+  PricingTier,
   ResolvedPricing,
   ServiceTier,
 } from './pricing/types';

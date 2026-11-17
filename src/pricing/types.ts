@@ -71,6 +71,9 @@ export interface ModelPricing {
   readonly maxOutputTokens?: number;
 }
 
+/** One long-context price tier from {@link ModelPricing.tiers}. */
+export type PricingTier = NonNullable<ModelPricing['tiers']>[number];
+
 export interface PricingTable {
   readonly schemaVersion: 1;
   readonly models: Readonly<Record<string, ModelPricing>>;

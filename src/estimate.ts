@@ -5,6 +5,7 @@ import {
   PRICING_CURRENCY,
   type CacheTtl,
   type ModelPricing,
+  type PricingTier,
   type ServiceTier,
 } from './pricing/types';
 import { resolveTokenizer } from './tokenizers';
@@ -190,6 +191,12 @@ export interface EstimateCostFromTokensResult {
    * used was the one requested.
    */
   readonly warnings?: string[];
+  /**
+   * Long-context tier applied to this estimate, if any. Absent when the input
+   * count did not cross a tier threshold, the model has no tiers, or a
+   * non-standard service tier was requested.
+   */
+  readonly pricingTier?: PricingTier;
 }
 
 const assertOptionalTokenCount = (value: number | undefined, field: string): void => {
@@ -251,6 +258,49 @@ const resolveTierPricing = (
   return { input, output, warnings };
 };
 
+interface LongContextSelection {
+  readonly tier: PricingTier | undefined;
+  readonly warnings: string[];
+}
+
+/**
+ * Finds the highest long-context tier whose threshold is strictly below the
+ * input count. Tiers only apply to the standard service tier: batch, flex and
+ * priority requests already carry their own prices, and combining them with a
+ * long-context surcharge would double-apply a discount.
+ */
+const resolveLongContextTier = (
+  model: string,
+  pricing: ModelPricing,
+  inputTokens: number,
+  serviceTier: ServiceTier,
+): LongContextSelection => {
+  const tiers = pricing.tiers;
+  if (tiers === undefined || tiers.length === 0) {
+    return { tier: undefined, warnings: [] };
+  }
+
+  let matched: PricingTier | undefined;
+  for (const candidate of tiers) {
+    if (inputTokens > candidate.aboveInputTokens) matched = candidate;
+  }
+
+  if (matched === undefined) {
+    return { tier: undefined, warnings: [] };
+  }
+
+  if (serviceTier !== 'standard') {
+    return {
+      tier: undefined,
+      warnings: [
+        `Long-context tier above ${matched.aboveInputTokens} tokens is not applied to the ${serviceTier} service tier for ${model}.`,
+      ],
+    };
+  }
+
+  return { tier: matched, warnings: [] };
+};
+
 /**
  * Costs token counts you already have, without tokenizing anything.
  *
@@ -305,45 +355,83 @@ export const estimateCostFromTokens = async (
 
   const { modelPricing, estimated } = await resolveModelPricing(model, options);
 
-  const tier = resolveTierPricing(model, modelPricing, serviceTier);
-  const warnings = [...tier.warnings];
+  const servicePricing = resolveTierPricing(model, modelPricing, serviceTier);
+  const longContext = resolveLongContextTier(model, modelPricing, inputTokens, serviceTier);
+  const appliedTier = longContext.tier;
+  const warnings = [...servicePricing.warnings, ...longContext.warnings];
 
-  // Cache reads: use the published cache-read price, else the normal input rate.
-  const cacheReadPrice = modelPricing.cacheReadInput ?? tier.input;
-  if (modelPricing.cacheReadInput === undefined && cacheReadInputTokens > 0) {
-    warnings.push(`No cache read price for ${model}; using the normal input price.`);
+  const effectiveInput = appliedTier?.input ?? servicePricing.input;
+  const effectiveOutput = appliedTier?.output ?? servicePricing.output;
+
+  // Cache reads: a tier may set its own rate; otherwise fall back to the
+  // model's base cache-read rate, then to the normal input rate.
+  let cacheReadPrice: number;
+  if (appliedTier !== undefined) {
+    if (appliedTier.cacheReadInput !== undefined) {
+      cacheReadPrice = appliedTier.cacheReadInput;
+    } else if (modelPricing.cacheReadInput !== undefined) {
+      cacheReadPrice = modelPricing.cacheReadInput;
+      if (cacheReadInputTokens > 0) {
+        warnings.push(
+          `No cache read price in the tier above ${appliedTier.aboveInputTokens} tokens for ${model}; using the model's base cache read price.`,
+        );
+      }
+    } else {
+      // No tier cache-read price and no base cache-read price: use the model's
+      // base input price, not the tier input price, so the fallback stays the
+      // documented "base input" rate.
+      cacheReadPrice = modelPricing.input;
+      if (cacheReadInputTokens > 0) {
+        warnings.push(`No cache read price for ${model}; using the normal input price.`);
+      }
+    }
+  } else {
+    cacheReadPrice = modelPricing.cacheReadInput ?? servicePricing.input;
+    if (modelPricing.cacheReadInput === undefined && cacheReadInputTokens > 0) {
+      warnings.push(`No cache read price for ${model}; using the normal input price.`);
+    }
   }
 
   // Cache writes: TTL selects the price; a missing 1h price falls back to 5m.
+  const fiveMinuteCacheCreationPrice =
+    appliedTier?.cacheCreationInput ?? modelPricing.cacheCreationInput;
   let cacheCreationPrice: number;
   if (cacheTtl === '1h') {
-    if (modelPricing.cacheCreationInputAbove1hr !== undefined) {
-      cacheCreationPrice = modelPricing.cacheCreationInputAbove1hr;
-    } else if (modelPricing.cacheCreationInput !== undefined) {
-      cacheCreationPrice = modelPricing.cacheCreationInput;
+    const oneHourCacheCreationPrice =
+      appliedTier?.cacheCreationInputAbove1hr ?? modelPricing.cacheCreationInputAbove1hr;
+
+    if (oneHourCacheCreationPrice !== undefined) {
+      cacheCreationPrice = oneHourCacheCreationPrice;
+    } else if (fiveMinuteCacheCreationPrice !== undefined) {
+      cacheCreationPrice = fiveMinuteCacheCreationPrice;
       if (cacheCreationInputTokens > 0) {
         warnings.push(
           `No 1-hour cache creation price for ${model}; using the 5-minute cache write price.`,
         );
       }
     } else {
-      cacheCreationPrice = tier.input;
+      cacheCreationPrice = effectiveInput;
       if (cacheCreationInputTokens > 0) {
         warnings.push(`No cache creation price for ${model}; using the normal input price.`);
       }
     }
-  } else if (modelPricing.cacheCreationInput !== undefined) {
-    cacheCreationPrice = modelPricing.cacheCreationInput;
+  } else if (fiveMinuteCacheCreationPrice !== undefined) {
+    cacheCreationPrice = fiveMinuteCacheCreationPrice;
   } else {
-    cacheCreationPrice = tier.input;
+    cacheCreationPrice = effectiveInput;
     if (cacheCreationInputTokens > 0) {
       warnings.push(`No cache creation price for ${model}; using the normal input price.`);
     }
   }
 
   // Reasoning: use the published reasoning price, else the normal output rate.
-  const reasoningPrice = modelPricing.outputReasoning ?? tier.output;
-  if (modelPricing.outputReasoning === undefined && reasoningOutputTokens > 0) {
+  const reasoningPrice =
+    appliedTier?.outputReasoning ?? modelPricing.outputReasoning ?? effectiveOutput;
+  if (
+    appliedTier?.outputReasoning === undefined &&
+    modelPricing.outputReasoning === undefined &&
+    reasoningOutputTokens > 0
+  ) {
     warnings.push(`No reasoning price for ${model}; using the normal output price.`);
   }
 
@@ -351,10 +439,10 @@ export const estimateCostFromTokens = async (
   const regularOutputTokens = outputTokens - reasoningOutputTokens;
 
   const breakdown: EstimateCostBreakdown = {
-    input: regularInputTokens * tier.input,
+    input: regularInputTokens * effectiveInput,
     cacheRead: cacheReadInputTokens * cacheReadPrice,
     cacheCreation: cacheCreationInputTokens * cacheCreationPrice,
-    output: regularOutputTokens * tier.output,
+    output: regularOutputTokens * effectiveOutput,
     reasoning: reasoningOutputTokens * reasoningPrice,
   };
 
@@ -379,5 +467,6 @@ export const estimateCostFromTokens = async (
     estimated,
     ...(wantsBreakdown ? { breakdown } : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
+    ...(appliedTier !== undefined ? { pricingTier: appliedTier } : {}),
   };
 };
