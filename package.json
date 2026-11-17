@@ -71,7 +71,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "size": "npm pack --dry-run",
-    "update:pricing": "node scripts/update-pricing.mjs",
+    "update:pricing": "npm run build && node scripts/update-pricing.mjs",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {

@@ -2,23 +2,19 @@
 /**
  * Regenerates src/pricing/snapshot.json from the LiteLLM pricing feed.
  *
- * Usage: npm run update:pricing
+ * Usage: npm run update:pricing   (runs npm run build first)
  *
- * The extraction below intentionally mirrors `src/pricing/normalize.ts` rather
- * than importing it: this script is plain .mjs so it can run without a build
- * step, and Node's type stripping cannot resolve this project's extensionless
- * imports. `test/pricing.test.ts` asserts the generated snapshot matches the
- * normalizer's contract, so the two cannot silently drift apart. The one
- * deliberate difference is the chat/completion mode filter: the snapshot is
- * kept small by omitting audio/image/embedding-only entries, while the live
- * normalizer keeps accepting any entry that carries both token prices.
+ * The normalization itself lives in `src/pricing/normalize.ts` and is consumed
+ * here from the built `dist/normalize.js`, so the refresh script and the
+ * library share exactly one implementation. `tsup.config.ts` has a dedicated
+ * entry for it; it is not part of the published package.
  *
  * The output is formatted one model per line on purpose: the scheduled
- * update-pricing workflow opens a pull request, and this layout keeps that diff
+ * update-pricing workflow opens a pull request, and this layout keeps the diff
  * to only the models that actually changed.
  *
- * The output is also byte-stable across runs. Model keys are sorted and prices
- * go through `JSON.stringify`, so `updatedAt` is the only field that could
+ * The output is byte-stable across runs. Model keys are sorted and prices go
+ * through `JSON.stringify`, so `updatedAt` is the only field that could
  * otherwise drift. It is therefore written as "when the data last changed"
  * rather than "when this script last ran": the file is first rendered with the
  * previous `updatedAt`, and only if that does not reproduce the committed file
@@ -28,6 +24,7 @@
  */
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { normalizeModelEntry } from '../dist/normalize.js';
 
 const LITELLM_PRICING_URL =
   'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
@@ -36,134 +33,17 @@ const OUTPUT_PATH = fileURLToPath(new URL('../src/pricing/snapshot.json', import
 const LIMITS_OUTPUT_PATH = fileURLToPath(new URL('../src/pricing/limits.json', import.meta.url));
 
 const RESERVED_KEYS = new Set(['sample_spec', 'keys', 'version']);
-const TOKENS_PER_UNIT = { per_token: 1, per_1k: 1_000, per_1m: 1_000_000 };
 
 /** Modes that are chat/completion style and should be included in the snapshot. */
 const CHAT_MODES = new Set(['chat', 'completion', 'responses']);
 
-const readPrice = (entry, kind) => {
-  for (const [field, unit] of [
-    [`${kind}_cost_per_token`, 'per_token'],
-    [`${kind}_cost_per_1k_tokens`, 'per_1k'],
-    [`${kind}_cost_per_1m_tokens`, 'per_1m'],
-  ]) {
-    const value = entry[field];
-    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
-      return value / TOKENS_PER_UNIT[unit];
-    }
-  }
-  return undefined;
-};
-
-const readSimplePrice = (entry, field) => {
+/** Reads a non-negative finite number, or undefined. */
+const readNumber = (entry, field) => {
   const value = entry[field];
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 };
 
-const normalizeEntry = (raw) => {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
-
-  // Only include chat/completion-style models
-  const mode = raw.mode;
-  if (typeof mode !== 'string' || !CHAT_MODES.has(mode)) return undefined;
-
-  const input = readPrice(raw, 'input');
-  const output = readPrice(raw, 'output');
-  if (input === undefined || output === undefined) return undefined;
-
-  const provider = typeof raw.litellm_provider === 'string' ? raw.litellm_provider : undefined;
-
-  // Cache pricing
-  const cacheReadInput = readSimplePrice(raw, 'cache_read_input_token_cost');
-  const cacheCreationInput = readSimplePrice(raw, 'cache_creation_input_token_cost');
-  const cacheCreationInputAbove1hr = readSimplePrice(raw, 'cache_creation_input_token_cost_above_1hr');
-
-  // Service tier pricing
-  const inputBatch = readSimplePrice(raw, 'input_cost_per_token_batches');
-  const outputBatch = readSimplePrice(raw, 'output_cost_per_token_batches');
-  const inputFlex = readSimplePrice(raw, 'input_cost_per_token_flex');
-  const outputFlex = readSimplePrice(raw, 'output_cost_per_token_flex');
-  const inputPriority = readSimplePrice(raw, 'input_cost_per_token_priority');
-  const outputPriority = readSimplePrice(raw, 'output_cost_per_token_priority');
-
-  // Reasoning pricing
-  const outputReasoning = readSimplePrice(raw, 'output_cost_per_reasoning_token');
-
-  const pricing = {
-    input,
-    output,
-    cacheReadInput,
-    cacheCreationInput,
-    cacheCreationInputAbove1hr,
-    inputBatch,
-    outputBatch,
-    inputFlex,
-    outputFlex,
-    inputPriority,
-    outputPriority,
-    outputReasoning,
-  };
-
-  if (provider !== undefined) {
-    pricing.provider = provider;
-  }
-
-  // Context limits live in a separate file so the main snapshot stays small.
-  const maxInputTokens = readSimplePrice(raw, 'max_input_tokens');
-  const maxOutputTokens = readSimplePrice(raw, 'max_output_tokens');
-  const limits = {};
-  if (maxInputTokens !== undefined) limits.maxInputTokens = maxInputTokens;
-  if (maxOutputTokens !== undefined) limits.maxOutputTokens = maxOutputTokens;
-
-  return {
-    pricing,
-    limits: Object.keys(limits).length > 0 ? limits : undefined,
-  };
-};
-
-/** Every numeric field the snapshot may carry. Missing fields are allowed. */
-const NUMERIC_FIELDS = [
-  'input',
-  'output',
-  'cacheReadInput',
-  'cacheCreationInput',
-  'cacheCreationInputAbove1hr',
-  'inputBatch',
-  'outputBatch',
-  'inputFlex',
-  'outputFlex',
-  'inputPriority',
-  'outputPriority',
-  'outputReasoning',
-  'maxInputTokens',
-  'maxOutputTokens',
-];
-
-/**
- * Verifies the generated table before it is written. A malformed snapshot is
- * worse than a stale one, so this fails the run rather than committing it.
- */
-const assertWellFormed = (models) => {
-  for (const [key, pricing] of Object.entries(models)) {
-    if (typeof pricing !== 'object' || pricing === null || Array.isArray(pricing)) {
-      throw new Error(`Malformed pricing entry for ${key}: expected an object`);
-    }
-    for (const field of NUMERIC_FIELDS) {
-      const value = pricing[field];
-      if (value === undefined) continue;
-      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-        throw new Error(`Malformed pricing for ${key}.${field}: ${String(value)}`);
-      }
-    }
-    if ('provider' in pricing && typeof pricing.provider !== 'string') {
-      throw new Error(`Malformed provider for ${key}: expected a string`);
-    }
-  }
-};
-
 const formatSnapshot = (models, updatedAt) => {
-  // Compact JSON: no indentation or extra whitespace. Keys are sorted so the
-  // file stays byte-stable and diffs only reflect real pricing changes.
   const sortedModels = Object.fromEntries(
     Object.keys(models)
       .sort()
@@ -186,21 +66,6 @@ const formatLimits = (limits) => {
       .map((key) => [key, limits[key]]),
   );
   return JSON.stringify(sortedLimits);
-};
-
-const assertLimitsWellFormed = (limits) => {
-  for (const [key, entry] of Object.entries(limits)) {
-    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
-      throw new Error(`Malformed limits entry for ${key}: expected an object`);
-    }
-    for (const field of ['maxInputTokens', 'maxOutputTokens']) {
-      const value = entry[field];
-      if (value === undefined) continue;
-      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-        throw new Error(`Malformed limits for ${key}.${field}: ${String(value)}`);
-      }
-    }
-  }
 };
 
 /** The committed snapshot's raw text plus its metadata, or undefined if unusable. */
@@ -232,6 +97,52 @@ const readPreviousLimits = async () => {
     return await readFile(LIMITS_OUTPUT_PATH, 'utf8');
   } catch {
     return undefined;
+  }
+};
+
+/** Fails the run rather than committing a malformed table. */
+const assertWellFormed = (models) => {
+  for (const [key, pricing] of Object.entries(models)) {
+    if (typeof pricing !== 'object' || pricing === null || Array.isArray(pricing)) {
+      throw new Error(`Malformed pricing entry for ${key}: expected an object`);
+    }
+    for (const field of ['input', 'output']) {
+      const value = pricing[field];
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        throw new Error(`Malformed pricing for ${key}.${field}: ${String(value)}`);
+      }
+    }
+    if (pricing.tiers !== undefined) {
+      if (!Array.isArray(pricing.tiers)) {
+        throw new Error(`Malformed tiers for ${key}: expected an array`);
+      }
+      for (const tier of pricing.tiers) {
+        if (typeof tier.aboveInputTokens !== 'number' || tier.aboveInputTokens <= 0) {
+          throw new Error(`Malformed tier threshold for ${key}: ${String(tier.aboveInputTokens)}`);
+        }
+        for (const field of ['input', 'output']) {
+          const value = tier[field];
+          if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+            throw new Error(`Malformed tier ${field} for ${key} above ${tier.aboveInputTokens}`);
+          }
+        }
+      }
+    }
+  }
+};
+
+const assertLimitsWellFormed = (limits) => {
+  for (const [key, entry] of Object.entries(limits)) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new Error(`Malformed limits entry for ${key}: expected an object`);
+    }
+    for (const field of ['maxInputTokens', 'maxOutputTokens']) {
+      const value = entry[field];
+      if (value === undefined) continue;
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        throw new Error(`Malformed limits for ${key}.${field}: ${String(value)}`);
+      }
+    }
   }
 };
 
@@ -267,15 +178,38 @@ const main = async () => {
   const models = {};
   const limits = {};
   let skipped = 0;
+  let tiered = 0;
   for (const [key, value] of Object.entries(raw)) {
     if (RESERVED_KEYS.has(key)) continue;
-    const normalized = normalizeEntry(value);
-    if (normalized === undefined) {
+    // The snapshot is deliberately limited to chat/completion models so it
+    // stays small; audio/image/embedding-only entries are left out.
+    if (typeof value?.mode !== 'string' || !CHAT_MODES.has(value.mode)) continue;
+
+    // The one and only normalizer, shared with the library.
+    const pricing = normalizeModelEntry(value);
+    if (pricing === undefined) {
       skipped += 1;
       continue;
     }
-    models[key] = normalized.pricing;
-    if (normalized.limits !== undefined) limits[key] = normalized.limits;
+
+    // Context limits live in limits.json, not in the bundled snapshot, to keep
+    // it small. Split them out before writing the model entry.
+    const {
+      maxInputTokens: normalizedMaxInput,
+      maxOutputTokens: normalizedMaxOutput,
+      ...snapshotPricing
+    } = pricing;
+    models[key] = snapshotPricing;
+    if (snapshotPricing.tiers !== undefined && snapshotPricing.tiers.length > 0) tiered += 1;
+
+    const maxInputTokens = normalizedMaxInput ?? readNumber(value, 'max_input_tokens');
+    const maxOutputTokens = normalizedMaxOutput ?? readNumber(value, 'max_output_tokens');
+    if (maxInputTokens !== undefined || maxOutputTokens !== undefined) {
+      const entry = {};
+      if (maxInputTokens !== undefined) entry.maxInputTokens = maxInputTokens;
+      if (maxOutputTokens !== undefined) entry.maxOutputTokens = maxOutputTokens;
+      limits[key] = entry;
+    }
   }
 
   assertWellFormed(models);
@@ -297,7 +231,7 @@ const main = async () => {
     snapshotWithPreviousTimestamp === previous.text &&
     previousLimitsText === limitsText
   ) {
-    console.log(`Pricing snapshot already up to date (${count} models) - nothing written`);
+    console.log(`Pricing snapshot already up to date (${count} models, ${tiered} tiered) - nothing written`);
     return;
   }
 
@@ -313,6 +247,7 @@ const main = async () => {
   console.log(`Wrote ${OUTPUT_PATH}`);
   console.log(`Wrote ${LIMITS_OUTPUT_PATH}`);
   console.log(`  models: ${count}`);
+  console.log(`  tiered: ${tiered}`);
   console.log(`  skipped (missing input or output price): ${skipped}`);
   console.log(`  changes: ${added} added, ${removed} removed, ${repriced} repriced`);
 };

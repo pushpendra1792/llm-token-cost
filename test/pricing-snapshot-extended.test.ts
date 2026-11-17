@@ -28,7 +28,7 @@ const NUMERIC_FIELDS = [
   'maxOutputTokens',
 ] as const;
 
-const ALLOWED_KEYS = new Set<string>([...NUMERIC_FIELDS, 'provider']);
+const ALLOWED_KEYS = new Set<string>([...NUMERIC_FIELDS, 'provider', 'tiers']);
 
 interface ModelLimits {
   readonly maxInputTokens?: number;

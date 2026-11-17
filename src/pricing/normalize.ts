@@ -71,7 +71,7 @@ const asFiniteNumber = (value: unknown): number | undefined =>
  *   this is handled by the caller (estimateCostFromTokens) and a warning is added
  *   only when the relevant token count is > 0.
  */
-function parseTieredPricing(raw: unknown): ModelPricing['tiers'] {
+function parseTieredPricing(raw: unknown, baseInput: number, baseOutput: number): ModelPricing['tiers'] {
   if (!Array.isArray(raw)) return undefined;
 
   const entries = raw.filter(
@@ -110,6 +110,19 @@ function parseTieredPricing(raw: unknown): ModelPricing['tiers'] {
       continue;
     }
 
+    // If range[0] === 0, this entry represents the model's base price.
+    // Do NOT emit it as a tier. If its prices differ from the model's base price,
+    // log a warning (the caller can surface it) but still skip it.
+    if (above === 0) {
+      if (input !== undefined && input !== baseInput) {
+        console.warn(`Tiered pricing: model input price at threshold 0 differs from base (${input} vs ${baseInput})`);
+      }
+      if (output !== undefined && output !== baseOutput) {
+        console.warn(`Tiered pricing: model output price at threshold 0 differs from base (${output} vs ${baseOutput})`);
+      }
+      continue; // skip this entry entirely
+    }
+
     // If this threshold already exists, overwrite (last-wins)
     thresholdMap.set(above, {
       input,
@@ -135,6 +148,120 @@ function parseTieredPricing(raw: unknown): ModelPricing['tiers'] {
       outputReasoning: tier.outputReasoning ?? undefined,
     };
   });
+}
+
+/** The five bases that may carry a flat <base>_above_<N>k_tokens field. */
+const ABOVE_THRESHOLD_FIELD =
+  /^(input_cost_per_token|output_cost_per_token|cache_read_input_token_cost|cache_creation_input_token_cost|output_cost_per_reasoning_token)_above_(\d+)k_tokens$/;
+
+/**
+ * Parses flat <base>_above_<N>k_tokens fields into tiers.
+ *
+ * The regex is anchored at both ends on purpose, so service-tier variants
+ * (`..._priority`, `..._batches`, `..._flex`) and unrelated bases (for example
+ * audio) never match.
+ *
+ * A tier applies when inputTokens > N * 1000. Each threshold groups the five
+ * bases. A tier needs an input and an output price; when only the input side is
+ * present the model's base output price is used (and vice versa), with a
+ * warning so the fallback is visible. Cache/reasoning fields stay undefined
+ * when absent and fall back at estimate time.
+ */
+function parseFlatAboveThresholdFields(
+  entry: RawModelEntry,
+  baseInput: number,
+  baseOutput: number,
+): ModelPricing['tiers'] {
+  type TierFields = {
+    input: number | undefined;
+    output: number | undefined;
+    cacheReadInput: number | undefined;
+    cacheCreationInput: number | undefined;
+    cacheCreationInputAbove1hr: number | undefined;
+    outputReasoning: number | undefined;
+  };
+
+  const byThreshold = new Map<number, TierFields>();
+
+  for (const [key, rawValue] of Object.entries(entry as Record<string, unknown>)) {
+    const match = ABOVE_THRESHOLD_FIELD.exec(key);
+    if (match === null) continue;
+    const threshold = Number(match[2]) * 1000;
+    if (!Number.isFinite(threshold) || threshold <= 0) continue;
+    const value = asFiniteNumber(rawValue);
+    if (value === undefined) continue;
+
+    const fields = byThreshold.get(threshold) ?? {
+      input: undefined,
+      output: undefined,
+      cacheReadInput: undefined,
+      cacheCreationInput: undefined,
+      cacheCreationInputAbove1hr: undefined,
+      outputReasoning: undefined,
+    };
+
+    switch (match[1]) {
+      case 'input_cost_per_token':
+        fields.input = value;
+        break;
+      case 'output_cost_per_token':
+        fields.output = value;
+        break;
+      case 'cache_read_input_token_cost':
+        fields.cacheReadInput = value;
+        break;
+      case 'cache_creation_input_token_cost':
+        fields.cacheCreationInput = value;
+        break;
+      case 'output_cost_per_reasoning_token':
+        fields.outputReasoning = value;
+        break;
+    }
+
+    byThreshold.set(threshold, fields);
+  }
+
+  const thresholds = Array.from(byThreshold.keys()).sort((a, b) => a - b);
+  return thresholds.map((aboveInputTokens) => {
+    const fields = byThreshold.get(aboveInputTokens)!;
+    if (fields.input === undefined) {
+      console.warn(
+        `Tiered pricing: no input price above ${aboveInputTokens} tokens; falling back to base input (${baseInput})`,
+      );
+    }
+    if (fields.output === undefined) {
+      console.warn(
+        `Tiered pricing: no output price above ${aboveInputTokens} tokens; falling back to base output (${baseOutput})`,
+      );
+    }
+    return {
+      aboveInputTokens,
+      input: fields.input ?? baseInput,
+      output: fields.output ?? baseOutput,
+      cacheReadInput: fields.cacheReadInput,
+      cacheCreationInput: fields.cacheCreationInput,
+      cacheCreationInputAbove1hr: fields.cacheCreationInputAbove1hr,
+      outputReasoning: fields.outputReasoning,
+    };
+  });
+}
+
+/**
+ * Merges tiers from tiered_pricing arrays and flat above-threshold fields.
+ * Array tiers win on a duplicate threshold; the result is sorted ascending.
+ */
+function mergeTiers(
+  arrayTiers: ModelPricing['tiers'],
+  flatTiers: ModelPricing['tiers'],
+): NonNullable<ModelPricing['tiers']> {
+  const byThreshold = new Map<number, NonNullable<ModelPricing['tiers']>[number]>();
+  for (const tier of arrayTiers ?? []) byThreshold.set(tier.aboveInputTokens, tier);
+  for (const tier of flatTiers ?? []) {
+    if (!byThreshold.has(tier.aboveInputTokens)) byThreshold.set(tier.aboveInputTokens, tier);
+  }
+  return Array.from(byThreshold.keys())
+    .sort((a, b) => a - b)
+    .map((threshold) => byThreshold.get(threshold)!);
 }
 
 /**
@@ -202,8 +329,15 @@ export const normalizeModelEntry = (raw: unknown): ModelPricing | undefined => {
   // Reasoning pricing
   const outputReasoning = readSimplePrice(entry, 'output_cost_per_reasoning_token');
 
+  // Base prices for tier threshold comparisons
+  const baseInput = input;
+  const baseOutput = output;
+
   // --- Long-context tiered pricing (from LiteLLM) ---
-  const tiers = parseTieredPricing(entry.tiered_pricing);
+  const arrayTiers = parseTieredPricing(entry.tiered_pricing, baseInput, baseOutput);
+  const flatTiers = parseFlatAboveThresholdFields(entry, baseInput, baseOutput);
+  const mergedTiers = mergeTiers(arrayTiers, flatTiers);
+  const tiers = mergedTiers.length > 0 ? mergedTiers : undefined;
 
   // Context limits
   const maxInputTokens = asFiniteNumber(entry.max_input_tokens);

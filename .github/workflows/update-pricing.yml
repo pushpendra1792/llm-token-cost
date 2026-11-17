@@ -35,6 +35,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build (the refresh script imports dist/normalize.js)
+        run: npm run build
+
       - name: Refresh pricing snapshot
         run: npm run update:pricing
 

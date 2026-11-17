@@ -27,4 +27,18 @@ export default defineConfig([
     external: ['./index.js'],
     banner: { js: '#!/usr/bin/env node' },
   },
+  {
+    // Internal build used by scripts/update-pricing.mjs so the refresh script
+    // runs the real normalizer instead of a copy of it. Not part of the public
+    // API and not shipped: package.json "files" is a whitelist that omits it.
+    entry: { normalize: 'src/pricing/normalize.ts' },
+    format: ['esm'],
+    target: 'node20',
+    platform: 'node',
+    dts: false,
+    sourcemap: false,
+    clean: false,
+    splitting: false,
+    treeshake: true,
+  },
 ]);
