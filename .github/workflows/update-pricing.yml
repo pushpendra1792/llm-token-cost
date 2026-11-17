@@ -66,14 +66,24 @@ jobs:
             }
 
             // --- limits.json ---
+            // The feed does not always report both limits: many models have
+            // only an input or only an output limit. Validate whichever are
+            // present, and require at least one so empty entries cannot slip in.
             const limits = JSON.parse(readFileSync('src/pricing/limits.json', 'utf8'));
             for (const [id, entry] of Object.entries(limits)) {
-              if (typeof entry.maxInputTokens !== 'number' || !Number.isFinite(entry.maxInputTokens) || entry.maxInputTokens < 0) {
-                throw new Error('bad maxInputTokens for ' + id + ': ' + String(entry.maxInputTokens));
+              if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+                throw new Error('limits entry for ' + id + ' is not an object');
               }
-              if (typeof entry.maxOutputTokens !== 'number' || !Number.isFinite(entry.maxOutputTokens) || entry.maxOutputTokens < 0) {
-                throw new Error('bad maxOutputTokens for ' + id + ': ' + String(entry.maxOutputTokens));
+              let present = 0;
+              for (const field of ['maxInputTokens', 'maxOutputTokens']) {
+                const value = entry[field];
+                if (value === undefined) continue;
+                if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+                  throw new Error('bad ' + field + ' for ' + id + ': ' + String(value));
+                }
+                present += 1;
               }
+              if (present === 0) throw new Error('no limits for ' + id);
             }
 
             console.log(Object.keys(snap.models).length + ' models, updatedAt ' + snap.updatedAt + ', generatedAt ' + snap.generatedAt);
