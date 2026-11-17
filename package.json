@@ -47,6 +47,7 @@
     "dist/index.d.cts",
     "dist/cli.js",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "sideEffects": false,
