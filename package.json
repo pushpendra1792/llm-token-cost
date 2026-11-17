@@ -1,6 +1,6 @@
 {
   "name": "llm-token-cost",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Estimate LLM token counts and costs from raw prompt/completion text. Modern, zero-runtime-dependency successor to llm-cost.",
   "keywords": [
     "llm",
@@ -41,8 +41,13 @@
     "llm-token-cost": "dist/cli.js"
   },
   "files": [
-    "dist",
+    "dist/index.js",
+    "dist/index.cjs",
+    "dist/index.d.ts",
+    "dist/index.d.cts",
+    "dist/cli.js",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "sideEffects": false,
@@ -67,7 +72,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "size": "npm pack --dry-run",
-    "update:pricing": "node scripts/update-pricing.mjs",
+    "update:pricing": "npm run build && node scripts/update-pricing.mjs",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {

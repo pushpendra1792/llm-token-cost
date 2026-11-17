@@ -21,11 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      # Brackets the declared engines floor (>=20) and current LTS. The
-      # package has no native dependencies, so more versions would cost CI
-      # minutes without catching anything these two do not.
+      # Both legs are inside vitest 5's engines range
+      # (^22.12.0 || ^24.0.0 || >=26.0.0). The package itself still supports
+      # Node >= 20; the node20-smoke job covers that floor on the packed
+      # tarball instead of running the test runner there.
       matrix:
-        node: [20, 22]
+        node: [22, 24]
 
     steps:
       - uses: actions/checkout@v4
@@ -47,25 +48,6 @@ jobs:
       - name: Build
         run: npm run build
 
-  package:
-    name: Verify published tarball contents
-    runs-on: ubuntu-latest
-    needs: verify
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build
-        run: npm run build
-
       - name: Fail if sources or tests leak into the tarball
         run: |
           npm pack --dry-run --json > pack.json
@@ -83,4 +65,77 @@ jobs:
             }
             const kib = (tarball.unpackedSize / 1024).toFixed(0);
             console.log(tarball.files.length + ' files, ' + kib + ' KiB unpacked');
+          "
+
+  # Node 20 is the package's declared floor (engines.node >= 20) but is outside
+  # vitest 5's engines range, so the test suite does not run there. This job
+  # proves the thing users actually install: it builds and packs on Node 20,
+  # installs the tarball into an empty directory, and exercises both module
+  # formats plus the CLI against the bundled snapshot. The layout is
+  # self-contained (npm ci --ignore-scripts + build, rather than an artifact
+  # from the verify job) because the build has no engine requirements and this
+  # avoids an upload/download round trip.
+  node20-smoke:
+    name: Smoke-test the packed install (Node 20)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # --ignore-scripts keeps any dependency lifecycle script from running on
+      # an unsupported engine. Nothing here needs one: the build is tsup, and
+      # the package has a single pure-JS dependency.
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Build
+        run: npm run build
+
+      - name: Pack the tarball
+        run: npm pack --pack-destination "$RUNNER_TEMP"
+
+      - name: Install the tarball into an empty directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/smoke"
+          cd "$RUNNER_TEMP/smoke"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund "$RUNNER_TEMP"/llm-token-cost-*.tgz
+          cp "$GITHUB_WORKSPACE/scripts/smoke/esm.mjs" .
+          cp "$GITHUB_WORKSPACE/scripts/smoke/cjs.cjs" .
+
+      # An unreachable pricing URL forces the bundled snapshot, so the run does
+      # not depend on the LiteLLM feed. Both scripts assert pricingSource.
+      - name: ESM import
+        env:
+          LLM_TOKEN_COST_PRICING_URL: http://127.0.0.1:9/x.json
+        run: |
+          cd "$RUNNER_TEMP/smoke"
+          node esm.mjs
+
+      - name: CommonJS require
+        env:
+          LLM_TOKEN_COST_PRICING_URL: http://127.0.0.1:9/x.json
+        run: |
+          cd "$RUNNER_TEMP/smoke"
+          node cjs.cjs
+
+      - name: CLI
+        env:
+          LLM_TOKEN_COST_PRICING_URL: http://127.0.0.1:9/x.json
+        run: |
+          cd "$RUNNER_TEMP/smoke"
+          npx --no-install llm-token-cost "summarize this article" --model gpt-4o --json > cli.json
+          node -e "
+            const { readFileSync } = require('node:fs');
+            const result = JSON.parse(readFileSync('cli.json', 'utf8'));
+            console.log('cli pricingSource: ' + result.pricingSource);
+            if (result.pricingSource !== 'snapshot') {
+              console.error('::error::expected pricingSource snapshot, got ' + result.pricingSource);
+              process.exit(1);
+            }
           "

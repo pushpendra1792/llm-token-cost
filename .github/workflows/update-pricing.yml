@@ -5,8 +5,8 @@ name: Update pricing snapshot
 # workflow exits without opening a pull request.
 on:
   schedule:
-    - name: Weekly pricing refresh
-      cron: '17 6 * * 1'
+    # Weekly pricing refresh
+    - cron: '17 6 * * 1'
   workflow_dispatch:
 
 # Never cancel a refresh part-way: a cancelled run can leave a half-written
@@ -35,20 +35,28 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build (the refresh script imports dist/normalize.js)
+        run: npm run build
+
       - name: Refresh pricing snapshot
         run: npm run update:pricing
 
-      - name: Verify snapshot is well-formed
+      - name: Verify snapshots are well-formed
         run: |
           node --input-type=module -e "
             import { readFileSync } from 'node:fs';
-            const snapshot = JSON.parse(readFileSync('src/pricing/snapshot.json', 'utf8'));
-            if (snapshot.schemaVersion !== 1) throw new Error('unexpected schemaVersion: ' + snapshot.schemaVersion);
-            if (typeof snapshot.updatedAt !== 'string') throw new Error('updatedAt must be a string');
-            if (typeof snapshot.models !== 'object' || snapshot.models === null) throw new Error('models must be an object');
-            const models = Object.entries(snapshot.models);
-            if (models.length === 0) throw new Error('models is empty');
-            for (const [id, pricing] of models) {
+
+            // --- snapshot.json ---
+            const snap = JSON.parse(readFileSync('src/pricing/snapshot.json', 'utf8'));
+            if (snap.schemaVersion !== 1) throw new Error('unexpected schemaVersion: ' + snap.schemaVersion);
+            if (typeof snap.updatedAt !== 'string') throw new Error('updatedAt must be a string');
+            if (typeof snap.generatedAt !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}$/.test(snap.generatedAt)) {
+              throw new Error('generatedAt must be an ISO date (YYYY-MM-DD)');
+            }
+            if (typeof snap.models !== 'object' || snap.models === null) throw new Error('models must be an object');
+            const snapModels = Object.entries(snap.models);
+            if (snapModels.length === 0) throw new Error('models is empty');
+            for (const [id, pricing] of snapModels) {
               for (const side of ['input', 'output']) {
                 const value = pricing[side];
                 if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
@@ -56,13 +64,35 @@ jobs:
                 }
               }
             }
-            console.log(models.length + ' models, updatedAt ' + snapshot.updatedAt);
+
+            // --- limits.json ---
+            // The feed does not always report both limits: many models have
+            // only an input or only an output limit. Validate whichever are
+            // present, and require at least one so empty entries cannot slip in.
+            const limits = JSON.parse(readFileSync('src/pricing/limits.json', 'utf8'));
+            for (const [id, entry] of Object.entries(limits)) {
+              if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+                throw new Error('limits entry for ' + id + ' is not an object');
+              }
+              let present = 0;
+              for (const field of ['maxInputTokens', 'maxOutputTokens']) {
+                const value = entry[field];
+                if (value === undefined) continue;
+                if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+                  throw new Error('bad ' + field + ' for ' + id + ': ' + String(value));
+                }
+                present += 1;
+              }
+              if (present === 0) throw new Error('no limits for ' + id);
+            }
+
+            console.log(Object.keys(snap.models).length + ' models, updatedAt ' + snap.updatedAt + ', generatedAt ' + snap.generatedAt);
           "
 
       - name: Detect pricing changes
         id: changes
         run: |
-          if git diff --quiet -- src/pricing/snapshot.json; then
+          if git diff --quiet -- src/pricing/snapshot.json src/pricing/limits.json; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "No pricing changes upstream. Snapshot left untouched." >> "$GITHUB_STEP_SUMMARY"
           else
@@ -70,7 +100,7 @@ jobs:
             {
               echo "## Pricing changes"
               echo ""
-              git --no-pager diff --stat -- src/pricing/snapshot.json
+              git --no-pager diff --stat -- src/pricing/snapshot.json src/pricing/limits.json
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -99,5 +129,5 @@ jobs:
             - [ ] Review newly added models
             - [ ] Review removed or deprecated models
             - [ ] Spot-check a few prices against vendor pricing pages
-          add-paths: src/pricing/snapshot.json
+          add-paths: src/pricing/snapshot.json,src/pricing/limits.json
           delete-branch: true

@@ -1,10 +1,19 @@
 export { estimateCost, estimateCostFromTokens } from './estimate';
 export type {
+  EstimateCostBreakdown,
   EstimateCostFromTokensInput,
   EstimateCostFromTokensResult,
   EstimateCostInput,
   EstimateCostResult,
+  EstimatePricingSource,
 } from './estimate';
+
+export { estimateCostFromUsage } from './usage';
+export type {
+  EstimateCostFromUsageInput,
+  EstimateCostFromUsageResult,
+  UsageFormat,
+} from './usage';
 
 export {
   BudgetExceededError,
@@ -39,6 +48,7 @@ export { getTiktokenEncoder, isTiktokenModel, resolveTiktokenEncoding } from './
 
 export {
   DEFAULT_PRICING_TTL_MS,
+  DEFAULT_STALE_AFTER_DAYS,
   getBundledSnapshot,
   getPricing,
   LITELLM_PRICING_URL,
@@ -50,4 +60,12 @@ export type { GetPricingOptions } from './pricing/fetch';
 export { findModelPricing } from './pricing/lookup';
 export { normalizeLiteLLMPricing } from './pricing/normalize';
 export { PRICING_CURRENCY } from './pricing/types';
-export type { ModelPricing, PricingSource, PricingTable, ResolvedPricing } from './pricing/types';
+export type {
+  CacheTtl,
+  ModelPricing,
+  PricingSource,
+  PricingTable,
+  PricingTier,
+  ResolvedPricing,
+  ServiceTier,
+} from './pricing/types';

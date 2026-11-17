@@ -55,6 +55,24 @@ export const formatTable = (
       .trimEnd();
 
   const lines = [renderRow(headers), ...body.map(renderRow)];
+
+  // A snapshot footer is safe for the existing columns and tests: it appears
+  // only when every row used bundled pricing, which live/fixture tests do not.
+  const firstPricing = rows[0]?.estimate;
+  const allBundled =
+    rows.length > 0 &&
+    firstPricing?.pricingSource === 'snapshot' &&
+    firstPricing.pricingUpdatedAt !== undefined &&
+    rows.every(
+      ({ estimate }) =>
+        estimate.pricingSource === firstPricing.pricingSource &&
+        estimate.pricingUpdatedAt === firstPricing.pricingUpdatedAt,
+    );
+
+  if (allBundled && firstPricing?.pricingUpdatedAt !== undefined) {
+    lines.push(`pricing: snapshot (${firstPricing.pricingUpdatedAt.slice(0, 10)})`);
+  }
+
   return `${lines.join('\n')}\n`;
 };
 

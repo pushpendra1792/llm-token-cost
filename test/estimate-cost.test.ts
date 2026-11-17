@@ -308,6 +308,8 @@ describe('estimateCostFromTokens', () => {
       cost: 1000 * 0.0000025 + 500 * 0.00001,
       currency: PRICING_CURRENCY,
       estimated: false,
+      pricingSource: 'live',
+      pricingUpdatedAt: expect.any(String),
     });
   });
 
